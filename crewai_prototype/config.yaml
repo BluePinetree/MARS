@@ -1,0 +1,158 @@
+# ============================================================
+# 자율 연구 시스템 (CrewAI Prototype) - 시스템 설정
+# ============================================================
+# 이 파일은 시스템의 전반적인 설정을 관리합니다.
+# API 키는 .env 파일에서 관리됩니다.
+# ============================================================
+
+# ----------------------------------------------------------
+# 1. LLM 프로바이더 정의
+#    각 프로바이더의 접속 정보를 정의합니다.
+#    api_key_env: .env 파일에 설정된 환경변수 이름
+# ----------------------------------------------------------
+llm_providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    available_models:
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "gpt-4.1-mini"
+      - "gpt-5.2"
+      - "gpt-5.2-pro"
+      - "gpt-5.2-codex"
+      - "gpt-5-mini"
+      - "gpt-5-nano"
+  anthropic:
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+    available_models:
+      - "claude-sonnet-4-5-20250929"
+      - "claude-haiku-4-5-20251001"
+      - "claude-opus-4-1-20250805"
+  google:
+    api_key_env: "GOOGLE_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    available_models:
+      - "gemini-3-pro-preview"
+      - "gemini-3-flash-preview"
+      - "gemini-2.5-pro"
+      - "gemini-2.5-flash"
+      - "gemini-2.5-flash-lite-preview-09-2025"
+
+# ----------------------------------------------------------
+# 2. 에이전트별 LLM 할당
+#    각 에이전트에 사용할 프로바이더와 모델을 지정합니다.
+#    동일 세션에서 서로 다른 모델 조합이 가능합니다.
+#    예: Planner는 gpt-5.2, Coder는 claude-sonnet-4-5-20250929 등
+# ----------------------------------------------------------
+agent_llm_mapping:
+  research_planner:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.7   # 가설 생성 — 다양성 필요
+  experiment_designer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.2   # 파일 구조 설계 — 결정론적이어야 함
+  code_generator:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.0   # 코드 생성 — 무작위성 = 버그
+  experiment_executor:
+    provider: "openai"
+    model: "gpt-5-mini"
+    temperature: 0.0   # 실행 보고 — 사실 기반
+  result_analyzer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.1   # 분석 — 사실 기반, 약간의 추론 허용
+  paper_writer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.6   # 학술 문체 — 적절한 다양성 필요
+
+# ----------------------------------------------------------
+# 3. CrewAI 설정
+# ----------------------------------------------------------
+crew:
+  process: "sequential"          # sequential | hierarchical
+  verbose: true
+  memory: false
+  max_rpm: 30                    # Rate limit (requests per minute)
+  context_char_budget: 24000     # task description + context 총 문자 예산
+  context_token_budget: 6000     # 대략적 프롬프트 토큰 예산(문자/4 근사)
+  compact_max_chars: 2000        # compact 결과 최대 길이
+  chromadb_query_max_chars: 1500 # chromadb_search query 하드캡
+
+# ----------------------------------------------------------
+# 4. ChromaDB 설정 (벡터 메모리)
+# ----------------------------------------------------------
+chromadb:
+  persist_directory: "./data/chromadb"
+  collection_name: "research_memory"
+  embedding_model: "all-MiniLM-L6-v2"
+
+# ----------------------------------------------------------
+# 5. E2B Sandbox 설정 (코드 실행 환경)
+# ----------------------------------------------------------
+e2b:
+  api_key_env: "E2B_API_KEY"
+  timeout_seconds: 300
+  template: "Python3"
+  execution_backend: "workspace"   # workspace | sandbox | auto
+  workspace_dir: "."
+
+# ----------------------------------------------------------
+# 6. MLflow 설정 (실험 추적)
+# ----------------------------------------------------------
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "autonomous_research"
+
+# ----------------------------------------------------------
+# 7. Ray 설정 (분산 처리)
+# ----------------------------------------------------------
+ray:
+  enabled: true                 # 프로토타입에서는 기본 비활성화
+  num_cpus: 4
+  dashboard_host: "0.0.0.0"
+  dashboard_port: 8265
+
+# ----------------------------------------------------------
+# 8. 연구 기본 제약 조건
+# ----------------------------------------------------------
+research_defaults:
+  max_experiments: 3
+  time_limit_minutes: 60
+  preferred_frameworks:
+    - "PyTorch"
+    - "scikit-learn"
+
+# ----------------------------------------------------------
+# 9. 로깅 설정
+# ----------------------------------------------------------
+logging:
+  log_dir: "./logs"
+  log_format: "jsonl"            # JSONL 표준 형식
+  console_output: true           # 콘솔에도 출력 여부
+  log_level: "INFO"
+
+# ----------------------------------------------------------
+# 10. 실험 실행 환경 (P0-1: 환경 설정 외부화)
+# ----------------------------------------------------------
+experiment:
+  # 훈련용 Python 인터프리터 경로. 비어있으면 자동 탐지 (AutoDL 환경 우선)
+  python_executable: ""
+  # CIFAR 데이터 후보 경로 (순서대로 탐색, 없으면 torchvision 자동 다운로드)
+  cifar_data_candidates:
+    - "C:/Users/yunsu/Projects/AutoDL/data/cifar-10-batches-py"
+    - "C:/Users/yunsu/data/cifar-10-batches-py"
+  # GPU 동시 실행 허용 수 (1 = 직렬화, 2+ = 병렬 허용)
+  max_concurrent_gpu_runs: 1
+  # 결과 검증: 데이터셋별 최소 top1 정확도 (%). 이하면 허위 성공으로 거부
+  validation_thresholds:
+    cifar100: 5.0
+    cifar10: 15.0
+    imagenet: 10.0
+    default: 1.0

@@ -1,0 +1,15 @@
+{
+  "research_topic": "ResNet과 Vision Transformer(ViT)의 CIFAR-100 이미지 분류 성능 비교",
+  "research_goal": "두 모델 아키텍처의 정확도, 학습 속도, 파라미터 효율성을 체계적으로 비교 분석하여, 소규모 데이터셋에서의 최적 모델 선택 기준을 도출한다.",
+  "research_domain": "컴퓨터 비전 (Computer Vision)",
+  "data_path": "./data/cifar100",
+  "data_description": "CIFAR-100 데이터셋: 100개 클래스, 각 클래스당 600장 (학습 500 + 테스트 100), 32x32 RGB 이미지",
+  "output_path": "./outputs",
+  "constraints": {
+    "max_experiments": 3,
+    "time_limit_minutes": 60,
+    "preferred_frameworks": ["PyTorch", "torchvision"],
+    "gpu_required": false,
+    "evaluation_metrics": ["accuracy", "f1_score", "training_time"]
+  }
+}

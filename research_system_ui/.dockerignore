@@ -1,0 +1,12 @@
+node_modules
+.pnpm-store
+dist
+.next
+.turbo
+.git
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.local
+.env.*.local

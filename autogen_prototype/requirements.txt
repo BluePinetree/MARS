@@ -1,0 +1,40 @@
+# ============================================================
+# AutoGen 자율 연구 시스템 - Python 의존성
+# ============================================================
+
+# --- 멀티에이전트 프레임워크 ---
+autogen-agentchat==0.4.7
+autogen-ext[openai]==0.4.7
+
+# --- LLM 프로바이더 SDK ---
+openai>=1.30.0
+anthropic>=0.28.0
+google-generativeai>=0.5.0
+
+# --- 메시지 브로커 (선택) ---
+aio-pika>=9.4.0          # RabbitMQ 비동기 클라이언트
+
+# --- 벡터 데이터베이스 ---
+lancedb>=0.6.0
+sentence-transformers>=2.7.0
+
+# --- 웹 프레임워크 ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+sse-starlette>=2.0.0      # Server-Sent Events
+
+# --- 설정 및 유틸리티 ---
+pyyaml>=6.0
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# --- 로깅 및 모니터링 ---
+rich>=13.7.0               # 터미널 출력 포맷팅
+
+# --- 코드 실행 (로컬 폴백) ---
+docker>=7.0.0              # OpenHands 대안 로컬 Docker 실행
+
+# --- 테스트 ---
+pytest>=8.2.0
+pytest-asyncio>=0.23.0

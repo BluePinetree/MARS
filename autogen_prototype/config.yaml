@@ -1,0 +1,98 @@
+﻿# AutoGen prototype configuration
+
+llm_providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    available_models:
+      - "gpt-5.2"
+      - "gpt-5.2-pro"
+      - "gpt-5.2-codex"
+      - "gpt-5-mini"
+      - "gpt-5-nano"
+
+  anthropic:
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+    available_models:
+      - "claude-sonnet-4-5-20250929"
+      - "claude-haiku-4-5-20251001"
+      - "claude-opus-4-1-20250805"
+
+  google:
+    api_key_env: "GOOGLE_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    available_models:
+      - "gemini-3-pro-preview"
+      - "gemini-3-flash-preview"
+      - "gemini-2.5-pro"
+      - "gemini-2.5-flash"
+      - "gemini-2.5-flash-lite-preview-09-2025"
+
+agent_llm_mapping:
+  research_planner:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.7
+    max_tokens: 4096
+
+  coder:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.3
+    max_tokens: 8192
+
+  critic:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.5
+    max_tokens: 4096
+
+  executor:
+    provider: "openai"
+    model: "gpt-5-mini"
+    temperature: 0.1
+    max_tokens: 2048
+
+group_chat:
+  max_rounds: 30
+  speaker_selection: "auto"
+  allow_repeat_speaker: true
+  termination_keyword: "RESEARCH_COMPLETE"
+  context_char_budget: 24000
+  context_token_budget: 6000
+  compact_max_chars: 2000
+
+rabbitmq:
+  host: "localhost"
+  port: 5672
+  username: "guest"
+  password: "guest"
+  exchange_name: "research_exchange"
+  queue_prefix: "agent_"
+  enabled: false
+
+lancedb:
+  db_path: "./data/lance_db"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  table_name: "research_knowledge"
+  top_k: 5
+  query_max_chars: 1500
+
+openhands:
+  enabled: false
+  api_url: "http://localhost:3000"
+  workspace_dir: "./workspace"
+  timeout_seconds: 300
+  fallback_to_local: true
+
+logging:
+  log_dir: "./logs"
+  log_format: "jsonl"
+  console_output: true
+  log_level: "INFO"
+
+research_defaults:
+  max_experiments: 3
+  time_limit_minutes: 60
+  output_base_path: "./outputs"

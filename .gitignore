@@ -1,0 +1,113 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+*.pyo
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.conda/
+
+# ── Environment & secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+secrets.json
+credentials.json
+
+# ── Dataset cache files ───────────────────────────────────────────────────────
+crewai_prototype/.cache/
+**/.cache/
+
+# ── Pipeline runtime outputs (never commit) ────────────────────────────────────
+crewai_prototype/outputs/
+crewai_prototype/runs/
+crewai_prototype/results/
+crewai_prototype/logs/
+crewai_prototype/workspace/
+autogen_prototype/outputs/
+autogen_prototype/runs/
+langgraph_prototype/outputs/
+langgraph_prototype/runs/
+
+# ── Context / memory files ─────────────────────────────────────────────────────
+context/runtime_memory.md
+context/handoff_state.json
+context/compact_history.md
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+research_system_ui/.next/
+research_system_ui/dist/
+research_system_ui/.turbo/
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Claude Code internals ─────────────────────────────────────────────────────
+.claude/
+
+# ── Internal planning & dev docs (not for public repo) ───────────────────────
+CLAUDE.md
+*/CLAUDE.md
+DEV_NOTES.md
+IMPLEMENTATION_PLAN.md
+COMPARISON_PLAN.md
+PHASE1_DESIGN.md
+PROJECT_NOTE.md
+docs/DESIGN_MEETING.md
+docs/expert_review_*.md
+docs/implementation_plan_*.md
+docs/structural_review_*.md
+docs/frontend_implementation_plan_*.md
+docs/INDEX.md
+docs/AGENT_SPEC.md
+docs/MODULE_SPEC.md
+docs/PIPELINE_SPEC.md
+docs/CONSTANTS.md
+docs/ERROR_RECOVERY_SPEC.md
+graphify-out/
+mobile_bridge/
+research_system_ui/ideas.md
+autogen_prototype/DEV_PLAN.md
+langgraph_prototype/DEV_PLAN.md
+
+# ── ML artifacts ──────────────────────────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.h5
+*.safetensors
+data/
+datasets/

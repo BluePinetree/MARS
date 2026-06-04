@@ -1,0 +1,76 @@
+﻿# LangGraph Autonomous Research System - Configuration
+
+llm_config:
+  planner:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.3
+    max_tokens: 4096
+  designer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.4
+    max_tokens: 4096
+  coder:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.2
+    max_tokens: 8192
+  executor:
+    provider: "openai"
+    model: "gpt-5-mini"
+    temperature: 0.1
+    max_tokens: 2048
+  analyzer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.3
+    max_tokens: 4096
+  writer:
+    provider: "openai"
+    model: "gpt-5.2"
+    temperature: 0.5
+    max_tokens: 8192
+
+defaults:
+  max_experiments: 3
+  max_debug_loops: 3
+  time_limit_minutes: 60
+  target_accuracy: 0.90
+
+context:
+  char_budget: 24000
+  token_budget: 6000
+  compact_max_chars: 2000
+
+pinecone:
+  index_name: "research-papers"
+  namespace: "default"
+  top_k: 5
+  embedding_model: "text-embedding-3-small"
+  embedding_dimension: 1536
+  query_max_chars: 1500
+
+docker:
+  base_image: "python:3.11-slim"
+  memory_limit: "4g"
+  cpu_limit: 2.0
+  timeout_seconds: 600
+  network_mode: "none"
+
+wandb:
+  project: "autonomous-research"
+  log_frequency: 10
+
+celery:
+  broker_url: "redis://localhost:6379/0"
+  result_backend: "redis://localhost:6379/1"
+  task_serializer: "json"
+  result_serializer: "json"
+  task_time_limit: 3600
+  task_soft_time_limit: 3300
+
+logging:
+  level: "INFO"
+  log_dir: "./logs"
+  format: "jsonl"
