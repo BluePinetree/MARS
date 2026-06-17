@@ -20,6 +20,7 @@ Write loop per file:
 
 from __future__ import annotations
 
+import ast
 import logging
 import textwrap
 from pathlib import Path
@@ -82,8 +83,66 @@ def _write_to_disk(relative_path: str, workspace_root: str, content: str) -> Non
     full.write_text(content, encoding="utf-8")
 
 
+def _extract_api_surface(source: str) -> str:
+    """함수/클래스 시그니처 + 첫 번째 docstring만 추출한다.
+
+    imports, __all__, def/class 시그니처, docstring만 남기고 구현 본문은 제거.
+    AST 파싱 실패(SyntaxError) 시 원본을 그대로 반환한다.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    lines = source.splitlines()
+    out: list[str] = []
+
+    def _include(start: int, end: int) -> None:
+        out.extend(lines[start - 1 : end])
+
+    def _process_def(node) -> None:
+        sig_start = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+        if not node.body:
+            _include(sig_start, node.end_lineno)
+            return
+
+        body_first = node.body[0]
+        sig_end = max(sig_start, body_first.lineno - 1)
+        _include(sig_start, sig_end)
+
+        if (
+            isinstance(body_first, ast.Expr)
+            and isinstance(body_first.value, ast.Constant)
+            and isinstance(body_first.value.value, str)
+        ):
+            _include(body_first.lineno, body_first.end_lineno)
+            rest = node.body[1:]
+        else:
+            rest = node.body
+
+        out.append("")
+
+        if isinstance(node, ast.ClassDef):
+            for child in rest:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _process_def(child)
+                    out.append("")
+
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            _include(node.lineno, node.end_lineno)
+        elif isinstance(node, ast.Assign):
+            if any(ast.unparse(t) == "__all__" for t in node.targets):
+                _include(node.lineno, node.end_lineno)
+                out.append("")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _process_def(node)
+
+    return "\n".join(out)
+
+
 def _build_dep_context(imports_from: list[str], workspace_root: str) -> str:
-    """이미 작성된 의존성 파일들의 내용을 컨텍스트 문자열로 반환한다."""
+    """이미 작성된 의존성 파일들의 API 시그니처를 컨텍스트 문자열로 반환한다."""
     sections: list[str] = []
     total = 0
     for dep_path in imports_from:
@@ -91,14 +150,11 @@ def _build_dep_context(imports_from: list[str], workspace_root: str) -> str:
         if not full.exists():
             continue
         raw = full.read_text(encoding="utf-8", errors="replace")
-        if len(raw) > _MAX_DEP_CHARS:
-            truncated_chars = len(raw) - _MAX_DEP_CHARS
-            raw = raw[:_MAX_DEP_CHARS] + (
-                f"\n# ... (TRUNCATED: {truncated_chars} more chars not shown"
-                f" — exports list above is complete)"
-            )
-        sections.append(f"# === {dep_path} ===\n{raw}")
-        total += len(raw)
+        api = _extract_api_surface(raw)
+        if len(api) > _MAX_DEP_CHARS:
+            api = api[:_MAX_DEP_CHARS] + "\n# ... (TRUNCATED)"
+        sections.append(f"# === {dep_path} ===\n{api}")
+        total += len(api)
         if total >= _MAX_TOTAL_DEP_CHARS:
             break
     return "\n\n".join(sections)
@@ -509,7 +565,7 @@ def _generate_entry_point(
     """생성된 파일들을 바탕으로 실제 실험을 실행하는 엔트리포인트를 생성한다.
 
     - results/result.json에 metrics를 저장해야 함 (Phase 4 Writer가 읽음).
-    - 생성된 모든 파일의 경로와 책임을 컨텍스트로 제공.
+    - Stage 1 파일 실제 내용을 프롬프트에 포함해 LLM이 실제 클래스/함수 시그니처를 사용하도록 한다.
     """
     results_dir = str(Path(workspace_root) / "results")
 
@@ -530,6 +586,16 @@ def _generate_entry_point(
             file_summaries.append(f"  {p}: {spec.responsibility[:80]} (exports: {exports})")
         else:
             file_summaries.append(f"  {p}")
+
+    # Stage 1 파일 실제 내용 수집 (DataConfig 등 핵심 API 시그니처 포함)
+    stage1_paths = [
+        fr.path
+        for stage in coding_result.stages
+        if stage.stage == 1
+        for fr in stage.files
+        if fr.written
+    ]
+    dep_context = _build_dep_context(stage1_paths, workspace_root)
 
     profile = plan.planner.recommended_profile or "generic_script"
     stack_rule = _STACK_RULES.get(profile, _STACK_RULES["generic_script"])
@@ -552,7 +618,7 @@ def _generate_entry_point(
         else:
             import_examples.append(f"  import {imp}")
 
-    prompt = "\n".join([
+    prompt_parts = [
         f"Write a complete Python entry point script: {entry}",
         "",
         f"Research goal: {plan.planner.problem_statement}",
@@ -569,6 +635,18 @@ def _generate_entry_point(
         "",
         "Already-written workspace files (import from these):",
         *file_summaries,
+    ]
+
+    if dep_context:
+        prompt_parts += [
+            "",
+            "STAGE 1 FILE CONTENTS — actual class/function definitions.",
+            "Use ONLY the constructors and signatures shown below.",
+            "Do NOT add parameters that are not in these definitions.",
+            dep_context,
+        ]
+
+    prompt_parts += [
         "",
         "Import examples (correct form):",
         *import_examples,
@@ -583,7 +661,9 @@ def _generate_entry_point(
         "6. Add `if __name__ == '__main__': main()` at the bottom.",
         "",
         "Output ONLY valid Python source. No markdown, no explanation.",
-    ])
+    ]
+
+    prompt = "\n".join(prompt_parts)
 
     raw = llm.call([{"role": "user", "content": prompt}])
     if not isinstance(raw, str):
