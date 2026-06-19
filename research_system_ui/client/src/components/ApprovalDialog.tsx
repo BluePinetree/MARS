@@ -104,7 +104,7 @@ export default function ApprovalDialog({ runId, payload, onResolved }: ApprovalD
 
   return (
     <Dialog open>
-      <DialogContent className="w-[96vw] max-w-5xl h-[90vh] flex flex-col gap-0 p-0 overflow-hidden rounded-xl border-0 shadow-2xl [&>button]:hidden">
+      <DialogContent className="w-[90vw] h-[90vh] flex flex-col gap-0 p-0 overflow-hidden rounded-xl border-0 shadow-2xl [&>button]:hidden">
 
         {/* ── Header ───────────────────────────────────────────────────── */}
         <div className="shrink-0 px-6 pt-5 pb-4 border-b border-border/60 bg-gradient-to-r from-background to-muted/20">
