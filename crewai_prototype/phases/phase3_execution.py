@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -34,6 +35,7 @@ from core.llm_factory import create_llm_for_agent
 from crew_tools import RunCommandTool, ReadResultTool, WorkspaceReadTool
 from orchestration.approval_registry import CancellationToken, GuidanceRegistry
 from pipeline_config.constants import (
+    DATA_CACHE_DIR,
     EXPERIMENT_TIMEOUT_SECS,
     EXECUTOR_MAX_ITER,
     MAX_EXEC_REPAIR_ATTEMPTS,
@@ -180,9 +182,19 @@ def _run_script(
     stdout_lines: list[str] = []
 
     try:
+        env = os.environ.copy()
+        src_dir = str(Path(workspace_root) / "src")
+        existing_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_path}" if existing_path else src_dir
+
+        data_dir = DATA_CACHE_DIR or str(Path.home() / ".cache" / "mars_datasets")
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        env["DATA_DIR"] = data_dir
+
         proc = subprocess.Popen(
             cmd,
             cwd=workspace_root,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -345,8 +357,13 @@ def run_execution_phase(
             {"diagnosis": diagnosis, "repair_files": repair_files},
         )
 
-        if attempt >= MAX_EXEC_REPAIR_ATTEMPTS:
-            # Escalate
+        if attempt >= MAX_EXEC_REPAIR_ATTEMPTS or not repair_files:
+            # Escalate — either max attempts exhausted or nothing to repair (env/network issue)
+            reason = (
+                f"after {attempt} attempts"
+                if attempt >= MAX_EXEC_REPAIR_ATTEMPTS
+                else "no fixable files identified (likely environment/network issue)"
+            )
             from orchestration.approval_registry import GuidanceGate
             gate = GuidanceGate(
                 file_path=entry_point,
@@ -356,7 +373,7 @@ def run_execution_phase(
             guidance_registry.register(run_id, entry_point, gate)
             emit(
                 "USER_GUIDANCE_NEEDED",
-                f"[Phase 3] Cannot fix experiment after {attempt} attempts. "
+                f"[Phase 3] Cannot fix experiment ({reason}). "
                 f"Waiting for your guidance.",
                 {
                     "run_id": run_id,

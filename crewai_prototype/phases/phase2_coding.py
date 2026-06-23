@@ -76,11 +76,29 @@ def _emit_check_error(emit: EmitFn, file_path: str, check, attempt: int) -> None
     )
 
 
+def _ensure_init_files(directory: Path, workspace_root: Path) -> None:
+    """src/ 하위 서브디렉토리에 __init__.py가 없으면 빈 파일로 생성한다."""
+    try:
+        rel = directory.relative_to(workspace_root)
+    except ValueError:
+        return
+    if rel == Path("."):
+        return
+    current = workspace_root
+    for part in rel.parts:
+        current = current / part
+        init = current / "__init__.py"
+        if not init.exists():
+            init.write_text("", encoding="utf-8")
+
+
 def _write_to_disk(relative_path: str, workspace_root: str, content: str) -> None:
-    """내용을 workspace에 쓴다. 부모 디렉토리를 자동으로 생성한다."""
+    """내용을 workspace에 쓴다. 부모 디렉토리와 __init__.py를 자동으로 생성한다."""
     full = Path(workspace_root) / relative_path
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(content, encoding="utf-8")
+    if full.suffix == ".py":
+        _ensure_init_files(full.parent, Path(workspace_root))
 
 
 def _extract_api_surface(source: str) -> str:
@@ -193,6 +211,11 @@ def _generate_content(
         "  The workspace root is on sys.path; use absolute imports: `from module import X`.",
         "- For files inside subdirectories (e.g. src/models/resnet.py importing src/utils.py),",
         "  import as: `from utils import X`  (NOT `from ..utils import X`).",
+        "",
+        "DATASET RULES:",
+        "- For any dataset download (CIFAR-10, ImageNet, etc.), use",
+        "  `os.environ.get('DATA_DIR', './data')` as the root/cache directory.",
+        "  This directory is persistent across runs — only download if files are missing.",
         "",
         "Output ONLY valid Python source code.",
         "Do NOT include markdown fences, prose, or explanations.",

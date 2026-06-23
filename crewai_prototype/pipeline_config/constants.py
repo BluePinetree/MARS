@@ -60,6 +60,11 @@ MAX_EXEC_REPAIR_ATTEMPTS: int = _env("MAX_EXEC_REPAIR_ATTEMPTS", 3)
 # Prevents infinite repair spin when entry point repeatedly fails.
 MAX_SMOKE_TOTAL_SECS: int = _env("MAX_SMOKE_TOTAL_SECS", 300)
 
+# Persistent dataset cache directory shared across all runs.
+# Phase 3 injects this as DATA_DIR env var so generated code can reuse downloaded datasets.
+# Example: RESEARCH_PIPELINE_DATA_CACHE_DIR=C:/Users/yunsu/.cache/mars_datasets
+DATA_CACHE_DIR: str = _env("DATA_CACHE_DIR", "")
+
 # ── Phase 4: Paper Writing ────────────────────────────────────────────────────
 
 # Max revision attempts per paper section before marking NEEDS_REVIEW.
