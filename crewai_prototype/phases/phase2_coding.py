@@ -36,7 +36,7 @@ from core.handoff_models import (
     StageCodingResult,
 )
 from core.llm_factory import create_llm_for_agent
-from crew_tools.syntax_check_tool import check_import, check_syntax
+from crew_tools.syntax_check_tool import check_dataclass_fields, check_import, check_syntax
 from orchestration.approval_registry import CancellationToken, GuidanceRegistry
 from pipeline_config.constants import (
     MAX_AUTO_REPAIR_ATTEMPTS,
@@ -280,12 +280,15 @@ def _repair_content(
 # ── 검사 파이프라인 ────────────────────────────────────────────────────────────
 
 def _run_checks(file_path: str, workspace_root: str) -> CheckResult:
-    """구문 검사 후 import 검사. 첫 번째 실패 또는 통과를 반환한다."""
+    """구문 → import → dataclass 필드 검사. 첫 번째 실패 또는 통과를 반환한다."""
     full = Path(workspace_root) / file_path
     syntax = check_syntax(full)
     if not syntax.passed:
         return syntax
-    return check_import(full, workspace_root)
+    import_check = check_import(full, workspace_root)
+    if not import_check.passed:
+        return import_check
+    return check_dataclass_fields(file_path, workspace_root)
 
 
 # ── 수정 루프 ──────────────────────────────────────────────────────────────────
@@ -537,6 +540,22 @@ def run_coding_phase(
         for file_spec in files:
             if cancel and cancel.is_cancelled:
                 break
+
+            # Stage 3 파일은 Stage 1 전체를 dep context에 강제 포함
+            # (Designer가 imports_from을 누락하거나 예산 초과로 드롭되어도 dataclass API 보장)
+            if stage_num == 3:
+                stage1_written = [
+                    fr.path
+                    for s in coding_result.stages
+                    if s.stage == 1
+                    for fr in s.files
+                    if fr.written
+                ]
+                extra = [p for p in stage1_written if p not in file_spec.imports_from]
+                if extra:
+                    file_spec = file_spec.model_copy(
+                        update={"imports_from": file_spec.imports_from + extra}
+                    )
 
             file_result = _repair_loop(
                 file_spec=file_spec,

@@ -97,9 +97,13 @@ Fix instructions:
 {fix_instructions}
 User hint: {hint}
 
+Stage 1 API definitions (authoritative — these are the ONLY valid signatures):
+{stage1_api}
+
 For each file in the repair list:
 1. Call WorkspaceReadTool to read its current content.
-2. Apply the fix instructions.
+2. Apply the fix instructions. When fixing TypeError on class instantiation,
+   use ONLY the fields shown in Stage 1 API definitions above.
 3. Call WorkspaceWriteTool to save the repaired content.
 4. Call SyntaxCheckTool to verify the file compiles.
 5. Fix any syntax errors before moving to the next file.
@@ -276,6 +280,17 @@ def run_execution_phase(
     entry_point = plan.designer.entry_point or "src/main.py"
     attempt = 0
     hint = ""
+
+    # Stage 1 API surface — repair agent가 올바른 클래스 정의를 참조하도록 미리 빌드
+    from phases.phase2_coding import _build_dep_context
+    stage1_paths = [
+        fr.path
+        for s in coding_result.stages
+        if s.stage == 1
+        for fr in s.files
+        if fr.written
+    ]
+    stage1_api = _build_dep_context(stage1_paths, workspace_root) if stage1_paths else "(none)"
     diagnosis = ""
     fix_instructions: list[str] = []
 
@@ -413,6 +428,7 @@ def run_execution_phase(
                     diagnosis=diagnosis,
                     fix_instructions=fi_text,
                     hint=hint or "(none)",
+                    stage1_api=stage1_api,
                 ),
                 expected_output="DONE",
                 agent=_make_repair_agent(repair_llm),

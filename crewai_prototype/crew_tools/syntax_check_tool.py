@@ -52,6 +52,75 @@ _SKIP_IMPORT_PATTERNS = re.compile(
 )
 
 
+def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -> CheckResult:
+    """AST 기반 검사: 워크스페이스의 @dataclass 정의와 호출부의 kwarg를 대조한다.
+
+    torch import가 있어 check_import가 스킵되는 파일에서도
+    RunConfig(amp=True) 같은 런타임 TypeError를 Phase 2에서 잡는다.
+    """
+    workspace = Path(workspace_root)
+    entry_full = (workspace / entry_path) if not Path(entry_path).is_absolute() else Path(entry_path)
+    if not entry_full.exists():
+        return CheckResult(passed=True)
+
+    try:
+        entry_tree = ast.parse(entry_full.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return CheckResult(passed=True)  # syntax check가 따로 처리
+
+    # 1. 워크스페이스 전체에서 @dataclass 정의 수집
+    dataclass_fields: dict[str, set[str]] = {}
+    for py_file in workspace.rglob("*.py"):
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            is_dc = any(
+                (isinstance(d, ast.Name) and d.id == "dataclass") or
+                (isinstance(d, ast.Attribute) and d.attr == "dataclass")
+                for d in node.decorator_list
+            )
+            if is_dc:
+                dataclass_fields[node.name] = {
+                    item.target.id
+                    for item in node.body
+                    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+                }
+
+    if not dataclass_fields:
+        return CheckResult(passed=True)
+
+    # 2. entry point의 모든 Call 노드에서 kwarg 검증
+    for node in ast.walk(entry_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            class_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            class_name = node.func.attr
+        else:
+            continue
+        if class_name not in dataclass_fields:
+            continue
+        valid = dataclass_fields[class_name]
+        for kw in node.keywords:
+            if kw.arg and kw.arg not in valid:
+                return CheckResult(
+                    passed=False,
+                    error=(
+                        f"TypeError: {class_name}() got unexpected keyword argument '{kw.arg}'. "
+                        f"Valid fields: {sorted(valid)}"
+                    ),
+                    error_type="runtime",
+                    line_no=getattr(node, "lineno", None),
+                )
+
+    return CheckResult(passed=True)
+
+
 def check_import(file_path: str | Path, workspace_root: str | Path) -> CheckResult:
     """Run the file in a subprocess with import-only mode to detect import errors.
 
