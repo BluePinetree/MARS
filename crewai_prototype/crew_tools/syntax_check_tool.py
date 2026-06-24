@@ -93,7 +93,30 @@ def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -
     if not dataclass_fields:
         return CheckResult(passed=True)
 
-    # 2. entry point의 모든 Call 노드에서 kwarg 검증
+    # 2. entry point에서 varname → ClassName 매핑 수집 (직접 대입만)
+    # ex) spec = ExperimentSpec(...)  →  {"spec": "ExperimentSpec"}
+    var_types: dict[str, str] = {}
+    for node in ast.walk(entry_tree):
+        if isinstance(node, ast.Assign):
+            if (len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Call)):
+                varname = node.targets[0].id
+                call = node.value
+                if isinstance(call.func, ast.Name) and call.func.id in dataclass_fields:
+                    var_types[varname] = call.func.id
+                elif isinstance(call.func, ast.Attribute) and call.func.attr in dataclass_fields:
+                    var_types[varname] = call.func.attr
+        elif isinstance(node, ast.AnnAssign):
+            if (isinstance(node.target, ast.Name)
+                    and node.value is not None
+                    and isinstance(node.value, ast.Call)):
+                varname = node.target.id
+                call = node.value
+                if isinstance(call.func, ast.Name) and call.func.id in dataclass_fields:
+                    var_types[varname] = call.func.id
+
+    # 3. entry point의 모든 Call 노드에서 constructor kwarg 검증
     for node in ast.walk(entry_tree):
         if not isinstance(node, ast.Call):
             continue
@@ -117,6 +140,30 @@ def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -
                     error_type="runtime",
                     line_no=getattr(node, "lineno", None),
                 )
+
+    # 4. 인스턴스 속성 접근 검증: varname.attr → ClassName에 attr 없으면 AttributeError
+    # ex) spec.aug  →  ExperimentSpec에 aug 없으면 탐지
+    for node in ast.walk(entry_tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if not isinstance(node.value, ast.Name):
+            continue
+        varname = node.value.id
+        if varname not in var_types:
+            continue
+        class_name = var_types[varname]
+        valid = dataclass_fields[class_name]
+        if node.attr not in valid:
+            return CheckResult(
+                passed=False,
+                error=(
+                    f"AttributeError: '{class_name}' object has no attribute '{node.attr}' "
+                    f"(accessed as {varname}.{node.attr}). "
+                    f"Valid fields: {sorted(valid)}"
+                ),
+                error_type="runtime",
+                line_no=getattr(node, "lineno", None),
+            )
 
     return CheckResult(passed=True)
 

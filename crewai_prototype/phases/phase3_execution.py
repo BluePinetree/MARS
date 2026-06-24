@@ -202,6 +202,8 @@ def _run_script(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
 
         def _stream_stdout() -> None:
@@ -310,34 +312,48 @@ def run_execution_phase(
         if run_result["return_code"] == 0:
             rj = run_result.get("result_json", {})
             metrics = rj if isinstance(rj, dict) else {}
-            artifact_paths = _collect_artifacts(workspace_root)
 
+            # L2: result.json.success=False는 rc=0이어도 실패로 처리
+            # (스크립트가 graceful shutdown 후 rc=0 종료해도 실험 실패는 실패)
             if not metrics.get("success", True):
+                error_msg = str(metrics.get("error", "result.json.success=False"))[:400]
                 emit(
                     "AGENT_MESSAGE",
-                    f"[Phase 3] Warning: experiment exited cleanly (rc=0) but "
-                    f"result.json reports success=false. "
-                    f"Error: {str(metrics.get('error', ''))[:200]}. "
-                    f"Proceeding to paper writing with partial results.",
-                    {"warning": "exec_success_false", "error": metrics.get("error", "")},
+                    f"[Phase 3] rc=0 but result.json.success=False — treating as failure: {error_msg}",
+                    {"false_success": True, "error": error_msg, "attempt": attempt},
+                )
+                run_result = {**run_result, "return_code": -3, "stderr_tail": error_msg}
+            else:
+                # L3: numeric metric 없으면 advisory 경고 (실패 처리는 하지 않음)
+                has_numeric = any(
+                    isinstance(v, (int, float))
+                    for k, v in metrics.items()
+                    if k != "success"
+                )
+                if not has_numeric:
+                    emit(
+                        "AGENT_MESSAGE",
+                        "[Phase 3] Warning: result.json has no numeric metrics. Results may be incomplete.",
+                        {"no_metrics_warning": True},
+                    )
+
+                artifact_paths = _collect_artifacts(workspace_root)
+                emit(
+                    "AGENT_MESSAGE",
+                    f"[Phase 3] Experiment succeeded. Metrics: {_fmt_metrics(metrics)}",
+                    {"success": True, "metrics": metrics, "attempt": attempt},
+                )
+                return ExecutorResult(
+                    success=True,
+                    return_code=0,
+                    metrics=metrics,
+                    artifact_paths=artifact_paths,
+                    stdout_tail=run_result["stdout_tail"],
+                    stderr_tail=run_result["stderr_tail"],
+                    result_json_path=run_result.get("result_json_path", ""),
                 )
 
-            emit(
-                "AGENT_MESSAGE",
-                f"[Phase 3] Experiment succeeded. Metrics: {_fmt_metrics(metrics)}",
-                {"success": True, "metrics": metrics, "attempt": attempt},
-            )
-            return ExecutorResult(
-                success=True,
-                return_code=0,
-                metrics=metrics,
-                artifact_paths=artifact_paths,
-                stdout_tail=run_result["stdout_tail"],
-                stderr_tail=run_result["stderr_tail"],
-                result_json_path=run_result.get("result_json_path", ""),
-            )
-
-        # ── Failure path ──────────────────────────────────────────────────────
+        # ── Failure path (rc != 0 또는 L2 실패) ─────────────────────────────
         stderr = run_result["stderr_tail"]
         emit(
             "AGENT_MESSAGE",
