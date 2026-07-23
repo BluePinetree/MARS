@@ -99,15 +99,22 @@ def create_llm_for_agent(
     if agent_cfg.max_tokens is not None and agent_cfg.provider != "openai":
         llm_kwargs["max_tokens"] = agent_cfg.max_tokens
 
-    # Disable parallel tool calls for OpenAI models — GPT-5 tends to batch
-    # multiple tool calls into a JSON array, which CrewAI's ReAct executor rejects.
-    if agent_cfg.provider == "openai":
-        llm_kwargs["parallel_tool_calls"] = False
+    # NOTE: 과거 GPT-5 tool-call 배칭 방지용으로 parallel_tool_calls=False를 설정했으나,
+    # 이 값은 LLM 인스턴스 레벨에 박혀 tool 없는 호출(planner/designer 등)에도 전달된다.
+    # openai>=2.x는 tools 미지정 호출에서 parallel_tool_calls를 400으로 거부하므로 제거한다.
+    # (Phase 2 코딩은 이미 crew tool을 쓰지 않고 직접 LLM 호출로 전환됨(ADR-001),
+    #  Phase 4 writer의 배칭 문제는 프롬프트 포맷으로 별도 완화되어 있음)
 
-    # LiteLLM retry: 429/529 에러 시 최대 5회 자동 재시도
+    # LiteLLM retry: 429/529 에러 시 최대 5회 자동 재시도 (litellm 네이티브 파라미터)
     llm_kwargs["num_retries"] = 5
 
-    llm = LLM(**llm_kwargs)
+    # is_litellm=True 로 crewai 1.x 네이티브 프로바이더를 우회하고 LiteLLM 라우팅을 강제한다.
+    # 이 코드베이스는 "CrewAI가 내부적으로 litellm을 사용"하던 시절에 작성되어
+    # num_retries / parallel_tool_calls 같은 파라미터를 넘긴다. 그러나 crewai 1.14.3의
+    # 네이티브 OpenAI 프로바이더는 이들을 raw openai>=2.x SDK로 그대로 전달해
+    # TypeError(num_retries) / 400(parallel_tool_calls without tools)을 유발한다.
+    # LiteLLM 경로는 이 파라미터들을 올바르게 해석/제거하므로 회귀를 방지한다.
+    llm = LLM(is_litellm=True, **llm_kwargs)
 
     return llm
 
@@ -154,7 +161,6 @@ def make_reasoning_llm(
 
     try:
         api_key = getattr(base_llm, "api_key", None)
-        num_retries = getattr(base_llm, "num_retries", 3)
 
         kwargs: dict = {
             "model": model,
@@ -163,12 +169,11 @@ def make_reasoning_llm(
                 "type": "enabled",
                 "budget_tokens": budget_tokens,
             },
-            "num_retries": num_retries,
         }
         if api_key:
             kwargs["api_key"] = api_key
 
-        return LLM(**kwargs)
+        return LLM(is_litellm=True, **kwargs)
     except Exception:
         return base_llm
 

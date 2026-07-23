@@ -181,7 +181,19 @@ def _run_script(
     stdout는 실시간으로 emit("exec_stdout", line) 이벤트를 발생시킨다.
     stderr는 완료 후 일괄 수집한다.
     """
-    cmd = [sys.executable, entry_point]
+    # 스캐폴드 stable main.py의 CLI 규약(scaffolds/builder.py build_parser)에 맞춰 인자 전달.
+    # --output_root 미지정 시 기본값이 nested dir로 새어 phase3가 results/result.json을 못 찾고,
+    # --validation_tier 기본값 "smoke"는 degenerate(1.0) 평가를 낳는다. 실제 평가를 위해 명시한다.
+    # (scaffold cli는 parse_known_args라 비스캐폴드 entry에서도 안전하게 무시된다)
+    cmd = [
+        sys.executable, entry_point,
+        "--output-root", str(workspace_root),
+        "--validation-tier", "full",
+        "--dataset-origin", "real",
+        "--evaluation-scope", "full_test",
+        "--seed", "42",
+        "--device", "cpu",
+    ]
     start = time.monotonic()
     stdout_lines: list[str] = []
 
@@ -240,8 +252,19 @@ def _run_script(
             "stderr_tail": stderr_raw[-2000:] if stderr_raw else "",
             "duration_s": duration,
         }
-        # Try to read result.json
-        result_path = Path(workspace_root) / "results" / "result.json"
+        # Try to read the result artifact. The scaffold's write_result_json may name the
+        # file `result.json` OR `result_<run_id>.json` depending on the renderer, so prefer
+        # the plain name and fall back to the newest `result*.json` in results/.
+        results_dir = Path(workspace_root) / "results"
+        result_path = results_dir / "result.json"
+        if not result_path.exists() and results_dir.is_dir():
+            candidates = sorted(
+                results_dir.glob("result*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                result_path = candidates[0]
         if result_path.exists():
             try:
                 result["result_json"] = json.loads(result_path.read_text(encoding="utf-8"))
@@ -313,10 +336,12 @@ def run_execution_phase(
             rj = run_result.get("result_json", {})
             metrics = rj if isinstance(rj, dict) else {}
 
-            # L2: result.json.success=False는 rc=0이어도 실패로 처리
+            # L2: result.json 성공 플래그가 False면 rc=0이어도 실패로 처리
             # (스크립트가 graceful shutdown 후 rc=0 종료해도 실험 실패는 실패)
-            if not metrics.get("success", True):
-                error_msg = str(metrics.get("error", "result.json.success=False"))[:400]
+            # 스크립트마다 플래그 키 이름이 다름(success / execution_success) → 둘 다 검사
+            success_flag = metrics.get("success", metrics.get("execution_success", True))
+            if not success_flag:
+                error_msg = str(metrics.get("error", "result.json success flag=False"))[:400]
                 emit(
                     "AGENT_MESSAGE",
                     f"[Phase 3] rc=0 but result.json.success=False — treating as failure: {error_msg}",
@@ -326,9 +351,9 @@ def run_execution_phase(
             else:
                 # L3: numeric metric 없으면 advisory 경고 (실패 처리는 하지 않음)
                 has_numeric = any(
-                    isinstance(v, (int, float))
+                    isinstance(v, (int, float)) and not isinstance(v, bool)
                     for k, v in metrics.items()
-                    if k != "success"
+                    if k not in ("success", "execution_success")
                 )
                 if not has_numeric:
                     emit(

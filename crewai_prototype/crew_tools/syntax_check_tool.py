@@ -184,10 +184,16 @@ def check_import(file_path: str | Path, workspace_root: str | Path) -> CheckResu
     if _SKIP_IMPORT_PATTERNS.search(source):
         return CheckResult(passed=True)
 
+    # 실행부(phase3 _run_script)는 PYTHONPATH에 <workspace>/src 를 넣는다.
+    # import 검사도 동일하게 src/ 를 sys.path에 넣어야 `from artifacts import ...`
+    # 같은 bare 절대 import가 실행 때와 동일하게 해석된다. src/ 누락 시 스캐폴드
+    # main.py의 import가 spurious하게 실패해 파괴적 수리 루프를 유발한다.
+    src_root = str(Path(workspace_root) / "src")
     cmd = [
         sys.executable, "-c",
         f"import importlib.util, sys; "
         f"sys.path.insert(0, r'{workspace_root}'); "
+        f"sys.path.insert(0, r'{src_root}'); "
         f"spec = importlib.util.spec_from_file_location('_chk', r'{p}'); "
         f"mod = importlib.util.module_from_spec(spec); "
         f"sys.modules['_chk'] = mod; "

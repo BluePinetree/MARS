@@ -198,6 +198,20 @@ def _generate_content(
         f"Stack rule: {stack_rule}",
         f"Research context: {extra_context}",
     ]
+    if file_spec.path.endswith("experiment_impl.py"):
+        parts += [
+            "",
+            "SCAFFOLD CONTRACT (this file is invoked by the stable src/main.py — obey exactly):",
+            "- Expose `run_selected_experiments(args, runtime_context)` and `run_single_experiment(...)`.",
+            "- `runtime_context` (a config_schema.RuntimeContext) provides: output_root (Path),",
+            "  results_root (Path), seed (int), epochs (int), batch_size (int), device (str),",
+            "  data_root (Path|None). Use runtime_context.seed for reproducibility.",
+            "- `run_selected_experiments` MUST run the experiment(s) and RETURN a dict that contains a",
+            "  `metrics` object of NUMERIC results, e.g. {\"metrics\": {\"accuracy\": 0.83, \"roc_auc\": 0.86}}.",
+            "  For model comparisons, include each model's scores under `metrics` (e.g. per-model keys).",
+            "- Do NOT call sys.exit(), do NOT write results/result.json, and do NOT define main() —",
+            "  the stable src/main.py parses args and writes results/result.json from your returned dict.",
+        ]
     if deps:
         parts += [
             "",
@@ -733,17 +747,36 @@ def _run_smoke_test(
     workspace_root = plan.workspace.workspace_dir
     run_id = plan.workspace.run_id
 
+    # 스캐폴드가 소유하는 안정 파일 — 수리/재생성 대상에서 제외한다.
+    # 이들을 LLM이 수정하면 import 에러를 experiment_impl 스텁화로 "게이밍"해
+    # 실제 구현을 무력화하는 specification-gaming 실패가 발생한다.
+    _STABLE_SCAFFOLD = {
+        "src/main.py", "src/cli.py", "src/artifacts.py",
+        "src/config_schema.py", "src/metrics.py",
+    }
+    entry_is_stable = entry in _STABLE_SCAFFOLD
+    # 안정 entry(main.py)의 import 실패는 실제로 mutable 모듈에서 비롯되므로
+    # 수리는 experiment_impl.py를 대상으로 한다.
+    repair_target = "src/experiment_impl.py" if entry_is_stable else entry
+
     emit("AGENT_MESSAGE", f"[Phase 2] Smoke test: checking {entry}", {"entry": entry})
 
-    # 엔트리포인트 파일이 아예 없으면 먼저 생성 시도
+    # 엔트리포인트 파일이 아예 없으면 먼저 생성 시도 (단, 안정 스캐폴드 파일은 LLM 재생성 금지)
     entry_full = Path(workspace_root) / entry
     if not entry_full.exists():
-        emit("AGENT_MESSAGE", f"[Phase 2] Entry point missing — generating {entry}", {"entry": entry})
-        try:
-            content = _generate_entry_point(plan, coding_result, workspace_root, llm)
-            _write_to_disk(entry, workspace_root, content)
-        except Exception as exc:
-            logger.warning("Entry point generation failed: %s", exc)
+        if entry_is_stable:
+            emit(
+                "AGENT_MESSAGE",
+                f"[Phase 2] Stable entry {entry} missing — scaffold should provide it; skipping LLM generation",
+                {"entry": entry, "stable": True},
+            )
+        else:
+            emit("AGENT_MESSAGE", f"[Phase 2] Entry point missing — generating {entry}", {"entry": entry})
+            try:
+                content = _generate_entry_point(plan, coding_result, workspace_root, llm)
+                _write_to_disk(entry, workspace_root, content)
+            except Exception as exc:
+                logger.warning("Entry point generation failed: %s", exc)
 
     check = _run_checks(entry, workspace_root)
     if check.passed:
@@ -797,14 +830,23 @@ def _run_smoke_test(
             smoke_attempt = 0
             continue
 
-        # 실제 repair 호출 (단순 재확인 루프가 아님)
-        try:
-            content = _repair_content(
-                entry, workspace_root, check.error, hint, llm, attempt=smoke_attempt
+        # 실제 repair 호출 (단순 재확인 루프가 아님).
+        # 안정 entry(main.py)는 절대 덮어쓰지 않고 mutable 모듈(experiment_impl.py)을 수리한다.
+        target_full = Path(workspace_root) / repair_target
+        if entry_is_stable and not target_full.exists():
+            emit(
+                "AGENT_MESSAGE",
+                f"[Phase 2] Smoke repair target {repair_target} missing — cannot repair without stubbing stable entry.",
+                {"repair_target": repair_target},
             )
-            _write_to_disk(entry, workspace_root, content)
-        except Exception as exc:
-            logger.warning("Smoke test repair failed (attempt %d): %s", smoke_attempt, exc)
+        else:
+            try:
+                content = _repair_content(
+                    repair_target, workspace_root, check.error, hint, llm, attempt=smoke_attempt
+                )
+                _write_to_disk(repair_target, workspace_root, content)
+            except Exception as exc:
+                logger.warning("Smoke test repair failed (attempt %d): %s", smoke_attempt, exc)
 
         hint = ""  # hint 소비
         check = _run_checks(entry, workspace_root)

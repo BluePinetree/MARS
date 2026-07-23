@@ -269,6 +269,42 @@ class PipelineOrchestrator:
                 self._finish(run_id, "failed", "Cancelled after Phase 1")
                 return
 
+            # ── Scaffold materialization (Fix A) ──────────────────────────────
+            # V4 planning intentionally excludes stable files (main.py/cli.py/
+            # artifacts.py/config_schema.py); the scaffold owns them so that
+            # `results/result.json` is written DETERMINISTICALLY by the stable
+            # main.py, regardless of how the Coder shapes experiment_impl.py.
+            if start_phase <= 2:
+                from workspace.scaffold_service import ScaffoldService
+                profile_name = plan_bundle.planner.recommended_profile or "generic_script"
+                scaffold_input = {
+                    "research_topic": prepared.research_topic,
+                    "research_goal": prepared.goal,
+                    "profile": profile_name,
+                }
+                ws_struct = {
+                    "files": [
+                        {"path": f.path, "responsibility": f.responsibility, "symbols": f.exports}
+                        for f in plan_bundle.designer.files
+                        if f.mutable and not f.path.startswith("src/main")
+                    ],
+                    "generation_order": plan_bundle.designer.generation_order,
+                }
+                scaffold_svc = ScaffoldService()
+                pending = scaffold_svc.materialize_stable_only(
+                    output_path=Path(workspace.root_dir),
+                    research_input=scaffold_input,
+                    profile_name=profile_name,
+                )
+                scaffold_svc.finalize_with_designer_output(pending, ws_struct)
+                # Entry point is now the scaffold-owned stable main.py
+                plan_bundle.designer.entry_point = "src/main.py"
+                emit(
+                    "AGENT_MESSAGE",
+                    f"[Scaffold] Stable files + run_contract materialized (profile={profile_name})",
+                    {"phase": 2, "profile": profile_name, "entry_point": "src/main.py"},
+                )
+
             # ── Phase 2: Staged Coding ────────────────────────────────────────
             if start_phase <= 2:
                 coding_result = run_coding_phase(

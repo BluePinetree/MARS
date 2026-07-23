@@ -90,6 +90,11 @@ Stage rules:
 
 Do NOT include stable scaffold files (src/main.py, src/cli.py, src/artifacts.py,
 src/config_schema.py) — only mutable domain files.
+You MUST include `src/experiment_impl.py` (stage 3, mutable) that exports
+`run_single_experiment` and `run_selected_experiments`. The stable `src/main.py`
+calls `experiment_impl.run_selected_experiments(args, runtime_context)`; that function
+must RUN the experiment(s) and RETURN a dict containing a `metrics` object with numeric
+results. Do NOT write result.json yourself — the stable scaffold writes it.
 Output ONLY the JSON object. No prose."""
 
 
