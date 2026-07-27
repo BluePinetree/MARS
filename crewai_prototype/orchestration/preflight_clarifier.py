@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from orchestration.approval_registry import GuidanceGate, GuidanceRegistry
@@ -22,6 +22,9 @@ class PreflightQuestion:
     key: str
     text: str
     default: str
+    # 선택지(칩/라디오)로 제시할 후보 답변. 첫 항목을 권장값으로 본다.
+    # 비어 있으면 UI는 자유 입력(textarea)만 표시한다. "직접 입력" 폴백은 UI가 항상 제공.
+    choices: list[str] = field(default_factory=list)
 
 
 class PreflightClarifier:
@@ -69,6 +72,8 @@ class PreflightClarifier:
                     "default": q.default,
                     "timeout_secs": self.TIMEOUT_PER_QUESTION_SECS,
                     "options": ["continue", "provide_fix"],
+                    # 선택지형 UI용 후보 답변(첫 항목=권장). 없으면 UI는 자유 입력만 표시.
+                    "choices": q.choices,
                 },
             )
 
@@ -107,23 +112,39 @@ class PreflightClarifier:
         return [
             PreflightQuestion(
                 key="dataset_constraint",
-                text=f"'{topic}' 실험에서 사용할 데이터셋에 특별한 제약이 있나요? (없으면 기본값 사용)",
-                default="No special constraints — use the dataset defined in the plan.",
+                text=f"'{topic}' 실험에서 사용할 데이터셋에 특별한 제약이 있나요?",
+                default="특별한 제약 없음 — 플랜의 기본 데이터셋 사용",
+                choices=[
+                    "특별한 제약 없음 — 플랜의 기본 데이터셋 사용",
+                    "작은 subset으로 빠르게 검증",
+                    "가능한 전체 데이터 사용",
+                ],
             ),
             PreflightQuestion(
                 key="compute_constraint",
-                text="GPU 메모리나 CPU 코어 수 등 컴퓨팅 제약이 있나요?",
-                default="No specific constraints — use available hardware.",
+                text="컴퓨팅 자원 제약이 있나요?",
+                default="제약 없음 — 가용 하드웨어 자동 사용",
+                choices=[
+                    "제약 없음 — 가용 하드웨어 자동 사용",
+                    "GPU 우선 사용",
+                    "CPU만 사용",
+                ],
             ),
             PreflightQuestion(
                 key="eval_metric",
-                text="주요 평가 지표를 지정하고 싶은 게 있나요? (없으면 플랜 기본값 사용)",
-                default="Use the evaluation metric defined in the design plan.",
+                text="주요 평가 지표를 지정하고 싶은 게 있나요?",
+                default="플랜의 기본 평가 지표 사용",
+                choices=[
+                    "플랜의 기본 평가 지표 사용",
+                    "accuracy 중심",
+                    "F1 / ROC-AUC 중심",
+                ],
             ),
             PreflightQuestion(
                 key="extra_context",
                 text="추가로 실험에 반영해야 할 중요한 정보가 있나요?",
-                default="No additional context.",
+                default="추가 정보 없음",
+                choices=["추가 정보 없음"],
             ),
         ]
 
