@@ -16,17 +16,46 @@ from core.handoff_models import (
 
 MAX_STDOUT_CHARS = 500
 MAX_STDERR_CHARS = 500
+MAX_METRICS_ENTRIES = 30  # flat 항목 최대 개수
+
+
+def _flatten_metrics(metrics: dict) -> dict:
+    """result.json에서 flat 숫자/문자열 값만 추출한다.
+
+    중첩 dict/list (per-run 스펙, adversarial config 등)는 제거.
+    Writer에 필요한 것은 최종 성능 수치뿐이다.
+    """
+    if not metrics:
+        return {}
+    flat: dict = {}
+    for k, v in metrics.items():
+        if isinstance(v, (int, float, str, bool)):
+            flat[k] = v
+        elif isinstance(v, dict):
+            # 한 단계 내려가서 flat 값만 꺼냄 (예: {"resnet18": {"accuracy": 0.92}})
+            for sub_k, sub_v in v.items():
+                if isinstance(sub_v, (int, float, str, bool)):
+                    flat[f"{k}.{sub_k}"] = sub_v
+        if len(flat) >= MAX_METRICS_ENTRIES:
+            flat["__truncated__"] = f"(showing {MAX_METRICS_ENTRIES} of {len(metrics)} keys)"
+            break
+    return flat
 
 
 class ContextCompressor:
     """Phase 경계에서 대용량 텍스트를 압축해 다음 Phase 컨텍스트 크기를 제한한다."""
 
     def compress_executor_result(self, result: ExecutorResult) -> ExecutorResultSummary:
-        """ExecutorResult → ExecutorResultSummary (stdout/stderr 최대 500자)."""
+        """ExecutorResult → ExecutorResultSummary (stdout/stderr 최대 500자).
+
+        metrics는 flat 숫자/문자열 값만 추출한다.
+        result.json 전체(중첩 구조, per-run 스펙)를 그대로 넘기면
+        Writer 프롬프트가 수십만 토큰으로 폭발하기 때문.
+        """
         return ExecutorResultSummary(
             return_code=result.return_code,
             duration_s=result.duration_s,
-            metrics=result.metrics,
+            metrics=_flatten_metrics(result.metrics),
             stdout_excerpt=result.stdout_tail[-MAX_STDOUT_CHARS:] if result.stdout_tail else "",
             stderr_excerpt=result.stderr_tail[-MAX_STDERR_CHARS:] if result.stderr_tail else "",
             artifact_paths=result.artifact_paths,

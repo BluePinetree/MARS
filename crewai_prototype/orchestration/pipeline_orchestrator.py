@@ -343,12 +343,21 @@ class PipelineOrchestrator:
             # ── Phase 3: Experiment Execution ─────────────────────────────────
             if start_phase <= 3:
                 failure_detector = FailurePatternDetector()
+                # P1-3: 설정 시점에 선택된 실행 환경(python 실행파일)을 사용한다.
+                # 미지정 시 현재 서버 인터프리터로 실행(phase3가 폴백 처리).
+                run_env_python = None
+                try:
+                    _md = getattr(prepared.session, "metadata", None) or {}
+                    run_env_python = _md.get("environment") or None
+                except Exception:
+                    run_env_python = None
                 exec_result = run_execution_phase(
                     plan=plan_bundle,
                     coding_result=coding_result,
                     guidance_registry=self.guidance_registry,
                     emit=emit,
                     cancel=cancel,
+                    python_exe=run_env_python,
                 )
                 # 실패 시 패턴 감지 (escalation 판단은 run_execution_phase 내부에서 이미 처리)
                 if not exec_result.success:
@@ -408,6 +417,8 @@ class PipelineOrchestrator:
                 "exec_success": exec_result.success,
                 "metrics": exec_result.metrics,
                 "paper_quality": writing_result.overall_quality,
+                # P1-3: 재현성 메타데이터(실행 환경/버전/패키지 지문/entry_command)
+                "environment": getattr(exec_result, "environment", {}) or {},
             }
             self._finish(
                 run_id, "completed",

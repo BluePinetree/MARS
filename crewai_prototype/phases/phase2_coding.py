@@ -101,6 +101,148 @@ def _write_to_disk(relative_path: str, workspace_root: str, content: str) -> Non
         _ensure_init_files(full.parent, Path(workspace_root))
 
 
+# ── 파괴적 수리 회귀 가드 (public API shrink 탐지) ────────────────────────────
+
+def _is_public_name(name: str) -> bool:
+    """public 심볼 여부. `_`로 시작하면 비공개.
+
+    dunder(`__x__`)는 통상 프레임워크 훅(예: `__init__`, `__call__`)이지 공개
+    API 표면이 아니므로 축소 판단 대상에서 제외한다(상식선).
+    """
+    if name.startswith("__") and name.endswith("__"):
+        return False
+    return not name.startswith("_")
+
+
+def _public_symbol_set(source: str) -> set[str]:
+    """소스에 정의된 public 심볼 집합을 AST로 추출한다 (순수 함수).
+
+    반환 항목:
+      - 모듈 레벨 public 함수:         "func"
+      - 모듈 레벨 public 클래스:        "Class"
+      - public 클래스의 public 메서드:  "Class.method"
+
+    비공개(`_`로 시작)나 dunder는 제외. 파싱 실패(SyntaxError) 시 빈 집합을
+    반환한다 — 파싱 불가한 소스는 "정의된 심볼 없음"으로 취급해, 깨진 코드를
+    고치는 정상 수리가 이 가드에 걸리지 않도록 한다.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    symbols: set[str] = set()
+    _def = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    for node in tree.body:
+        if isinstance(node, _def):
+            if _is_public_name(node.name):
+                symbols.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            if not _is_public_name(node.name):
+                continue
+            symbols.add(node.name)
+            for child in node.body:
+                if isinstance(child, _def) and _is_public_name(child.name):
+                    symbols.add(f"{node.name}.{child.name}")
+    return symbols
+
+
+def _is_noop_body(node) -> bool:
+    """함수/메서드 본문이 사실상 no-op(스텁)인지 판정한다.
+
+    다음만으로 구성된 본문을 스텁으로 본다:
+      - docstring / 상수 표현식 (ast.Expr[Constant])
+      - `pass`
+      - `...` (Ellipsis)
+      - `raise NotImplementedError(...)`
+      - `return`(값 없음) 또는 `return None`
+    """
+    for stmt in node.body:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue  # docstring 또는 `...`
+        if isinstance(stmt, ast.Raise):
+            exc = stmt.exc
+            name = None
+            if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+                name = exc.func.id
+            elif isinstance(exc, ast.Name):
+                name = exc.id
+            if name == "NotImplementedError":
+                continue
+            return False
+        if isinstance(stmt, ast.Return):
+            if stmt.value is None:
+                continue
+            if isinstance(stmt.value, ast.Constant) and stmt.value.value is None:
+                continue
+            return False
+        return False
+    return True
+
+
+def _noop_symbol_set(source: str) -> set[str]:
+    """소스에서 본문이 no-op(스텁)인 public 함수/메서드 심볼 집합을 추출한다.
+
+    `_public_symbol_set`과 동일한 이름 규칙을 쓰되, 본문이 `_is_noop_body`인
+    항목만 담는다. 클래스 자체는 (본문 판정이 무의미하므로) 포함하지 않는다.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    noops: set[str] = set()
+    _def = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    for node in tree.body:
+        if isinstance(node, _def):
+            if _is_public_name(node.name) and _is_noop_body(node):
+                noops.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            if not _is_public_name(node.name):
+                continue
+            for child in node.body:
+                if isinstance(child, _def) and _is_public_name(child.name) and _is_noop_body(child):
+                    noops.add(f"{node.name}.{child.name}")
+    return noops
+
+
+def _detect_api_shrink(before: str, after: str) -> set[str]:
+    """수리 전→후 소스에서 public API가 삭제·축소된 심볼 집합을 반환한다.
+
+    "축소"의 두 형태:
+      1) 삭제: before에 있던 public 심볼이 after에 없다.
+      2) 스텁화: before에서 실체가 있던 public 함수/메서드가 after에서
+         no-op 스텁(pass / ... / return None / raise NotImplementedError)으로
+         후퇴했다. (예: MetricBundle.compute()의 본문 제거)
+
+    빈 집합이면 축소 없음(정상 수리). before가 파싱 불가하면(원본이 이미 깨짐)
+    비교 기준이 없으므로 빈 집합을 반환해 정상 수리를 막지 않는다.
+    """
+    before_syms = _public_symbol_set(before)
+    if not before_syms:
+        return set()  # 원본에 비교할 public 정의가 없음 → 가드 비적용
+
+    after_syms = _public_symbol_set(after)
+
+    # (1) 삭제된 public 심볼
+    removed = before_syms - after_syms
+
+    # (2) 실체 → no-op 스텁으로 후퇴한 심볼
+    before_noops = _noop_symbol_set(before)
+    after_noops = _noop_symbol_set(after)
+    # before에서 실체가 있던(=노옵 아님) & after에도 존재하지만 now no-op
+    shrunk = {
+        sym for sym in after_noops
+        if sym in before_syms and sym not in before_noops
+    }
+
+    return removed | shrunk
+
+
 def _extract_api_surface(source: str) -> str:
     """함수/클래스 시그니처 + 첫 번째 docstring만 추출한다.
 
@@ -241,6 +383,16 @@ def _generate_content(
     return _strip_fences(raw)
 
 
+_NO_API_SHRINK_RULE = (
+    "CRITICAL — DO NOT REMOVE OR STUB PUBLIC API:\n"
+    "You MUST keep every existing public function, class, and public method\n"
+    "(names not starting with '_'). Do NOT delete them and do NOT reduce their\n"
+    "bodies to a no-op (pass / ... / return None / raise NotImplementedError).\n"
+    "Fix the actual syntax/import error while PRESERVING all existing behavior.\n"
+    "If a checker complains about a symbol, correct it — never remove the symbol."
+)
+
+
 def _repair_content(
     file_path: str,
     workspace_root: str,
@@ -248,6 +400,7 @@ def _repair_content(
     hint: str,
     llm,
     attempt: int = 1,
+    extra_rule: str = "",
 ) -> str:
     """LLM을 직접 호출해 검사 오류가 있는 파일의 수정 버전을 생성한다.
 
@@ -281,6 +434,10 @@ def _repair_content(
         "",
         "IMPORT RULE: NEVER use relative imports (`from . import X` or `from .mod import X`).",
         "Use absolute imports only: `from module import X`.",
+    ]
+    if extra_rule:
+        parts += ["", extra_rule]
+    parts += [
         "",
         "Output ONLY the corrected Python source. No markdown fences. No explanation.",
     ]
@@ -303,6 +460,79 @@ def _run_checks(file_path: str, workspace_root: str) -> CheckResult:
     if not import_check.passed:
         return import_check
     return check_dataclass_fields(file_path, workspace_root)
+
+
+def _apply_repair_guarded(
+    target_path: str,
+    workspace_root: str,
+    error_msg: str,
+    hint: str,
+    llm,
+    attempt: int,
+    emit: EmitFn,
+) -> bool:
+    """수리 결과를 회귀 가드를 거쳐 디스크에 적용한다.
+
+    동작:
+      1. 수리 전 소스를 읽어 둔다(before). 파일이 없으면 before="".
+      2. `_repair_content`로 수리본을 생성.
+      3. `_detect_api_shrink(before, after)`로 public API 삭제·축소 검사.
+      4. 축소 감지 시:
+         - 이번 수리본을 반려(디스크에 쓰지 않음)하고,
+         - `_NO_API_SHRINK_RULE`을 프롬프트에 추가해 1회 재생성 시도.
+         - 재생성본도 축소하면 최종 반려 → 원본(before)을 유지(파일 미변경).
+         - `REPAIR_REJECTED_API_SHRINK` 이벤트로 로깅.
+      5. 축소 없으면 디스크에 기록.
+
+    반환: 새 내용을 실제로 디스크에 썼으면 True, 원본을 유지했으면 False.
+    LLM 호출 예외는 상위 루프가 처리하도록 그대로 전파한다.
+    """
+    full = Path(workspace_root) / target_path
+    before = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
+
+    content = _repair_content(target_path, workspace_root, error_msg, hint, llm, attempt=attempt)
+    shrunk = _detect_api_shrink(before, content)
+
+    if not shrunk:
+        _write_to_disk(target_path, workspace_root, content)
+        return True
+
+    # ── 반려 1: 축소 감지 → 강경 규칙 붙여 재생성 ────────────────────────────
+    emit(
+        "REPAIR_REJECTED_API_SHRINK",
+        f"[Coder] Repair for {target_path} rejected — would remove/stub public API: "
+        f"{', '.join(sorted(shrunk))[:200]}. Retrying with API-preservation rule.",
+        {
+            "file_path": target_path,
+            "attempt": attempt,
+            "shrunk_symbols": sorted(shrunk),
+            "stage": "retry",
+        },
+    )
+
+    retry = _repair_content(
+        target_path, workspace_root, error_msg, hint, llm,
+        attempt=attempt, extra_rule=_NO_API_SHRINK_RULE,
+    )
+    retry_shrunk = _detect_api_shrink(before, retry)
+
+    if not retry_shrunk:
+        _write_to_disk(target_path, workspace_root, retry)
+        return True
+
+    # ── 반려 2(최종): 재생성도 축소 → 원본 유지 ──────────────────────────────
+    emit(
+        "REPAIR_REJECTED_API_SHRINK",
+        f"[Coder] Repair for {target_path} rejected again — keeping original to avoid "
+        f"destructive repair. Symbols at risk: {', '.join(sorted(retry_shrunk))[:200]}.",
+        {
+            "file_path": target_path,
+            "attempt": attempt,
+            "shrunk_symbols": sorted(retry_shrunk),
+            "stage": "kept_original",
+        },
+    )
+    return False
 
 
 # ── 수정 루프 ──────────────────────────────────────────────────────────────────
@@ -375,8 +605,9 @@ def _repair_loop(
         )
 
         try:
-            content = _repair_content(file_path, workspace_root, error_msg, hint, llm, attempt=attempt)
-            _write_to_disk(file_path, workspace_root, content)
+            _apply_repair_guarded(
+                file_path, workspace_root, error_msg, hint, llm, attempt, emit
+            )
         except Exception as exc:
             logger.warning("Repair LLM call failed for %s (attempt %d): %s", file_path, attempt, exc)
 
@@ -841,10 +1072,9 @@ def _run_smoke_test(
             )
         else:
             try:
-                content = _repair_content(
-                    repair_target, workspace_root, check.error, hint, llm, attempt=smoke_attempt
+                _apply_repair_guarded(
+                    repair_target, workspace_root, check.error, hint, llm, smoke_attempt, emit
                 )
-                _write_to_disk(repair_target, workspace_root, content)
             except Exception as exc:
                 logger.warning("Smoke test repair failed (attempt %d): %s", smoke_attempt, exc)
 

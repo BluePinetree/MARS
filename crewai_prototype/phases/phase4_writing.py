@@ -34,7 +34,7 @@ from core.handoff_models import (
     WritingResult,
 )
 from core.llm_factory import create_llm_for_agent
-from crew_tools import WorkspaceReadTool, ReadResultTool, WriteReportTool
+from crew_tools import WorkspaceReadTool, WriteReportTool
 from pipeline_config.constants import (
     MAX_SECTION_REVISIONS,
     SECTION_MIN_WORDS,
@@ -256,7 +256,7 @@ def _make_writer_agent(llm) -> Agent:
             "Every number you write must come from the experiment results given to you."
         ),
         llm=llm,
-        tools=[WorkspaceReadTool(), ReadResultTool()],
+        tools=[WorkspaceReadTool()],  # ReadResultTool 제거 — metrics는 이미 프롬프트에 포함됨
         verbose=True,
         allow_delegation=False,
         max_iter=WRITER_MAX_ITER,
@@ -380,6 +380,9 @@ def _build_exec_summary(exec_result: ExecutorResult) -> str:
     return "\n".join(lines)
 
 
+_MAX_EXEC_SUMMARY_CHARS = 3000  # Writer 프롬프트 내 exec_summary 최대 글자 수
+
+
 def _build_exec_summary_text(exec_summary: ExecutorResultSummary) -> str:
     """ExecutorResultSummary → Writer 프롬프트용 텍스트 (압축된 입력 사용)."""
     if not exec_summary.success:
@@ -393,7 +396,10 @@ def _build_exec_summary_text(exec_summary: ExecutorResultSummary) -> str:
         lines.append(f"Output excerpt:\n{exec_summary.stdout_excerpt}")
     if exec_summary.result_json_path:
         lines.append(f"Result file: {exec_summary.result_json_path}")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > _MAX_EXEC_SUMMARY_CHARS:
+        text = text[:_MAX_EXEC_SUMMARY_CHARS] + "\n...[truncated for context budget]"
+    return text
 
 
 # ── Phase 4 main function ─────────────────────────────────────────────────────

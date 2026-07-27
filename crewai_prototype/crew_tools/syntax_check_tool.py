@@ -52,11 +52,55 @@ _SKIP_IMPORT_PATTERNS = re.compile(
 )
 
 
+def _is_dataclass_def(node: ast.ClassDef) -> bool:
+    """ClassDef에 @dataclass 데코레이터가 붙어있는지 확인 (@dataclass, @dataclasses.dataclass,
+    @dataclass(frozen=True) 등 Call 형태 포함)."""
+    for d in node.decorator_list:
+        target = d.func if isinstance(d, ast.Call) else d
+        if isinstance(target, ast.Name) and target.id == "dataclass":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "dataclass":
+            return True
+    return False
+
+
+def _collect_class_members(node: ast.ClassDef) -> set[str]:
+    """dataclass의 유효한 속성 이름 집합을 수집한다.
+
+    필드(AnnAssign / 기본값 Assign)뿐 아니라 **메서드/프로퍼티/클래스변수**도 포함한다.
+    이를 빼먹으면 `mb.compute()` 같은 정상 메서드 접근이 '없는 필드'로 오탐된다.
+    """
+    members: set[str] = set()
+    for item in node.body:
+        # 타입 어노테이션 필드:  name: T [= default]
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            members.add(item.target.id)
+        # 어노테이션 없는 클래스 변수:  name = default
+        elif isinstance(item, ast.Assign):
+            for tgt in item.targets:
+                if isinstance(tgt, ast.Name):
+                    members.add(tgt.id)
+        # 메서드 / 프로퍼티 (def, async def)
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            members.add(item.name)
+        # 중첩 클래스
+        elif isinstance(item, ast.ClassDef):
+            members.add(item.name)
+    return members
+
+
 def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -> CheckResult:
     """AST 기반 검사: 워크스페이스의 @dataclass 정의와 호출부의 kwarg를 대조한다.
 
     torch import가 있어 check_import가 스킵되는 파일에서도
     RunConfig(amp=True) 같은 런타임 TypeError를 Phase 2에서 잡는다.
+
+    cross-module 동명 dataclass 오탐 방지:
+    - 같은 이름의 @dataclass가 워크스페이스에 2개 이상 존재하면(예: metrics.py의 실제
+      정의 + train_eval.py의 stub) 어느 정의가 바인딩됐는지 확정할 수 없으므로
+      해당 이름은 필드/속성 검증에서 **보수적으로 제외**한다 (false positive 우선 방지).
+    - 단, entry point가 실제로 특정 파일에서 그 이름을 import 한다면 그 정의로 확정해
+      검증을 계속 수행한다 (진탐 유지).
     """
     workspace = Path(workspace_root)
     entry_full = (workspace / entry_path) if not Path(entry_path).is_absolute() else Path(entry_path)
@@ -68,27 +112,49 @@ def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -
     except SyntaxError:
         return CheckResult(passed=True)  # syntax check가 따로 처리
 
-    # 1. 워크스페이스 전체에서 @dataclass 정의 수집
-    dataclass_fields: dict[str, set[str]] = {}
+    # 1. 워크스페이스 전체에서 @dataclass 정의 수집.
+    #    동명 충돌 감지를 위해 (파일경로, 멤버집합) 목록을 이름별로 모은다.
+    per_name_defs: dict[str, list[tuple[Path, set[str]]]] = {}
     for py_file in workspace.rglob("*.py"):
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:
             continue
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            is_dc = any(
-                (isinstance(d, ast.Name) and d.id == "dataclass") or
-                (isinstance(d, ast.Attribute) and d.attr == "dataclass")
-                for d in node.decorator_list
-            )
-            if is_dc:
-                dataclass_fields[node.name] = {
-                    item.target.id
-                    for item in node.body
-                    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-                }
+            if isinstance(node, ast.ClassDef) and _is_dataclass_def(node):
+                per_name_defs.setdefault(node.name, []).append(
+                    (py_file.resolve(), _collect_class_members(node))
+                )
+
+    if not per_name_defs:
+        return CheckResult(passed=True)
+
+    # 1b. entry point의 import 문을 파싱해 "이름 → 바인딩된 정의 파일 stem" 힌트를 만든다.
+    #     ex) `from metrics import MetricBundle` → imported_from["MetricBundle"] = "metrics"
+    #     이 힌트로 동명 충돌을 해소할 수 있으면 검증을 유지한다.
+    imported_from: dict[str, str] = {}
+    for node in ast.walk(entry_tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            mod_stem = node.module.split(".")[-1]
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                imported_from[bound] = mod_stem
+
+    # 1c. 이름별로 검증에 쓸 최종 멤버 집합을 확정한다.
+    #     - 정의가 1개면 그대로 사용.
+    #     - 정의가 2개 이상이면:
+    #         * import 힌트로 파일이 특정되면 그 정의만 사용 (진탐 유지),
+    #         * 그렇지 않으면 이 이름은 검증에서 제외 (오탐 방지).
+    dataclass_fields: dict[str, set[str]] = {}
+    for name, defs in per_name_defs.items():
+        if len(defs) == 1:
+            dataclass_fields[name] = defs[0][1]
+            continue
+        target_stem = imported_from.get(name)
+        matched = [members for (path, members) in defs if path.stem == target_stem]
+        if target_stem and len(matched) == 1:
+            dataclass_fields[name] = matched[0]
+        # else: 동명 충돌 미해소 → 보수적으로 검증 제외 (dataclass_fields에 넣지 않음)
 
     if not dataclass_fields:
         return CheckResult(passed=True)

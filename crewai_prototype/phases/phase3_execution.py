@@ -16,12 +16,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from crewai import Agent, Crew, Task
 
@@ -170,11 +171,28 @@ def _make_repair_agent(llm) -> Agent:
 
 # ── Direct subprocess execution (faster than via agent) ──────────────────────
 
+def _experiment_cmd(python_exe: str, entry_point: str, workspace_root: str) -> "list[str]":
+    """실험 서브프로세스 실행 명령을 구성한다(스캐폴드 stable main.py CLI 규약).
+
+    run_execution_phase가 재현성 기록의 entry_command에도 동일 명령을 쓰도록 공용화한다.
+    """
+    return [
+        python_exe, entry_point,
+        "--output-root", str(workspace_root),
+        "--validation-tier", "full",
+        "--dataset-origin", "real",
+        "--evaluation-scope", "full_test",
+        "--seed", "42",
+        "--device", os.environ.get("MARS_EXPERIMENT_DEVICE", "cpu"),
+    ]
+
+
 def _run_script(
     entry_point: str,
     workspace_root: str,
     timeout: int,
     emit: Optional[Callable] = None,
+    python_exe: Optional[str] = None,
 ) -> dict:
     """Run the experiment script with Popen + streaming stdout.
 
@@ -185,15 +203,7 @@ def _run_script(
     # --output_root 미지정 시 기본값이 nested dir로 새어 phase3가 results/result.json을 못 찾고,
     # --validation_tier 기본값 "smoke"는 degenerate(1.0) 평가를 낳는다. 실제 평가를 위해 명시한다.
     # (scaffold cli는 parse_known_args라 비스캐폴드 entry에서도 안전하게 무시된다)
-    cmd = [
-        sys.executable, entry_point,
-        "--output-root", str(workspace_root),
-        "--validation-tier", "full",
-        "--dataset-origin", "real",
-        "--evaluation-scope", "full_test",
-        "--seed", "42",
-        "--device", "cpu",
-    ]
+    cmd = _experiment_cmd(python_exe or sys.executable, entry_point, str(workspace_root))
     start = time.monotonic()
     stdout_lines: list[str] = []
 
@@ -282,6 +292,174 @@ def _run_script(
         }
 
 
+# ── Contract verification (A3) ─────────────────────────────────────────────────
+#
+# S2 run에서 (1) 계획 success_criteria는 "3 epoch"였으나 실행은 1 epoch로 조용히
+# 강등됐고 (근원: scaffold `build_parser`의 --epochs default=1 + _run_script가
+# --epochs를 CLI로 전달하지 않음 → 실행규모 강등이 파이프라인 레벨에서 발생),
+# (2) numeric metric이 없어도 execution_success=true로 통과했다.
+# 아래 헬퍼들은 이런 계획/기대 대비 실제 결과의 불일치를 "감지·표면화"한다.
+# 성공/실패 판정은 바꾸지 않는다 (정보 표면화가 목적).
+
+# result.json에서 실제 epoch 수를 찾을 때 시도할 키 후보 (task 비의존, 방어적).
+_EPOCH_KEYS = ("epochs", "epoch", "num_epochs", "n_epochs", "epochs_run", "max_epochs", "total_epochs")
+
+# 일반적인 정량 metric 키 후보 (task 의존 — 존재하면 numeric contract를 만족한 것으로 본다).
+_EXPECTED_METRIC_KEYS = (
+    "accuracy", "acc", "top1", "top1_accuracy", "top5", "top5_accuracy",
+    "rmse", "mae", "mse", "f1", "f1_score", "auc", "auroc", "bleu",
+    "loss", "val_loss", "test_loss", "perplexity", "map", "precision", "recall",
+)
+
+# success_criteria 자유 텍스트에서 "3 epoch(s)" 형태를 뽑는 정규식.
+_EPOCH_TEXT_RE = re.compile(r"(\d+)\s*(?:training\s*)?epochs?\b", re.IGNORECASE)
+
+
+def _find_numeric(metrics: dict, keys) -> Optional[float]:
+    """metrics(및 중첩 dict)에서 key 후보에 해당하는 numeric 값을 방어적으로 탐색."""
+    def _coerce(v: Any) -> Optional[float]:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
+    # 최상위 우선
+    for k in keys:
+        if k in metrics:
+            c = _coerce(metrics[k])
+            if c is not None:
+                return c
+    # 흔한 중첩 컨테이너 (metrics/summary/final 등) 안도 한 단계 탐색
+    for container_key in ("metrics", "summary", "final", "final_metrics", "eval", "results"):
+        sub = metrics.get(container_key)
+        if isinstance(sub, dict):
+            for k in keys:
+                if k in sub:
+                    c = _coerce(sub[k])
+                    if c is not None:
+                        return c
+    return None
+
+
+def _has_numeric_metric(metrics: dict) -> bool:
+    """success/execution_success 등 비-metric 플래그를 제외하고 numeric metric이 있는지."""
+    _skip = {"success", "execution_success", "iteration", "seed", "epochs", "batch_size",
+             "num_workers", "epoch", "num_epochs", "n_epochs"}
+    for k, v in metrics.items():
+        if k in _skip:
+            continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return True
+        # 중첩 dict 안의 numeric도 인정
+        if isinstance(v, dict):
+            for vv in v.values():
+                if isinstance(vv, (int, float)) and not isinstance(vv, bool):
+                    return True
+    return False
+
+
+def _planned_epochs(plan: PlanBundle) -> Optional[int]:
+    """planner/designer success_criteria 텍스트에서 계획된 epoch 수를 추출 (최댓값)."""
+    texts: list[str] = []
+    try:
+        texts.extend(plan.planner.success_criteria or [])
+    except Exception:
+        pass
+    try:
+        texts.extend(plan.designer.success_criteria or [])
+    except Exception:
+        pass
+    found: list[int] = []
+    for t in texts:
+        for m in _EPOCH_TEXT_RE.finditer(str(t)):
+            try:
+                found.append(int(m.group(1)))
+            except ValueError:
+                continue
+    return max(found) if found else None
+
+
+def check_contract(plan: PlanBundle, metrics: dict) -> dict:
+    """실행 결과(metrics = result.json)를 계획/기대와 대조한 계약 검증 요약.
+
+    반환 dict 구조:
+      {
+        "planned_epochs": Optional[int],
+        "actual_epochs": Optional[float],
+        "has_numeric_metric": bool,
+        "expected_metric_found": bool,
+        "violations": [ {"type": str, "expected": ..., "actual": ...}, ... ],
+      }
+    성공/실패를 결정하지 않는다 — 호출측이 이벤트로 표면화하는 용도.
+    """
+    metrics = metrics if isinstance(metrics, dict) else {}
+    planned_epochs = _planned_epochs(plan)
+    actual_epochs = _find_numeric(metrics, _EPOCH_KEYS)
+    has_numeric = _has_numeric_metric(metrics)
+    expected_metric = _find_numeric(metrics, _EXPECTED_METRIC_KEYS)
+
+    violations: list[dict] = []
+
+    # (1) numeric metric 자체가 없음
+    if not has_numeric:
+        violations.append({
+            "type": "CONTRACT_METRICS_MISSING",
+            "expected": "at least one numeric metric in result.json",
+            "actual": "none",
+        })
+    # (2) 실행규모(epoch) 강등: 계획 > 실제
+    if planned_epochs is not None and actual_epochs is not None:
+        if actual_epochs < planned_epochs:
+            violations.append({
+                "type": "EXECUTION_SCALE_DOWNGRADE",
+                "expected": f"{planned_epochs} epochs (from success_criteria)",
+                "actual": f"{actual_epochs:g} epochs (from result.json)",
+            })
+
+    return {
+        "planned_epochs": planned_epochs,
+        "actual_epochs": actual_epochs,
+        "has_numeric_metric": has_numeric,
+        "expected_metric_found": expected_metric is not None,
+        "violations": violations,
+    }
+
+
+def _emit_contract_events(contract: dict, emit: EmitFn, attempt: int) -> None:
+    """계약 검증 결과를 명시 이벤트로 표면화. 정상(위반 없음)이면 EXECUTION_SCALE만 정보성 emit."""
+    planned = contract.get("planned_epochs")
+    actual = contract.get("actual_epochs")
+
+    # 실행 규모는 항상 정보성으로 남긴다 (계획값과 함께).
+    emit(
+        "EXECUTION_SCALE",
+        f"[Phase 3] Execution scale — planned_epochs={planned}, actual_epochs={actual}",
+        {
+            "planned_epochs": planned,
+            "actual_epochs": actual,
+            "attempt": attempt,
+        },
+    )
+
+    for v in contract.get("violations", []):
+        vtype = v.get("type", "CONTRACT_VIOLATION")
+        if vtype == "CONTRACT_METRICS_MISSING":
+            emit(
+                "CONTRACT_METRICS_MISSING",
+                "[Phase 3] Contract: result.json has no numeric metrics "
+                f"(expected: {v.get('expected')}).",
+                {"attempt": attempt, **v},
+            )
+        else:
+            emit(
+                "CONTRACT_VIOLATION",
+                f"[Phase 3] Contract violation ({vtype}): "
+                f"expected {v.get('expected')} but got {v.get('actual')}.",
+                {"attempt": attempt, **v},
+            )
+
+
 # ── Phase 3 main function ─────────────────────────────────────────────────────
 
 def run_execution_phase(
@@ -291,6 +469,7 @@ def run_execution_phase(
     emit: EmitFn,
     llm=None,
     cancel: Optional[CancellationToken] = None,
+    python_exe: Optional[str] = None,
 ) -> ExecutorResult:
     """Run the experiment and collect results. Escalates to user on persistent failure.
 
@@ -319,6 +498,40 @@ def run_execution_phase(
     diagnosis = ""
     fix_instructions: list[str] = []
 
+    # ── 재현성 메타데이터(P1-3): 실험을 실행할 python 환경을 기록·표면화한다.
+    # MARS의 재현성은 1차 지표이므로 실행 전에 env/버전/패키지 지문을 남긴다.
+    resolved_python = python_exe or sys.executable
+    if python_exe and not Path(python_exe).is_file():
+        emit(
+            "AGENT_MESSAGE",
+            f"[Phase 3] 지정된 실행 환경을 찾을 수 없어 현재 인터프리터로 대체합니다: {python_exe}",
+            {"requested_python": python_exe},
+        )
+        resolved_python = sys.executable
+    repro_env: dict = {}
+    try:
+        from core.env_detect import describe_python, requirements_hash
+        env_desc = describe_python(resolved_python)
+        device = os.environ.get("MARS_EXPERIMENT_DEVICE", "cpu")
+        repro_env = {
+            **env_desc,
+            "device": device,
+            "seed": 42,
+            "entry_command": " ".join(
+                _experiment_cmd(resolved_python, entry_point, str(workspace_root))
+            ),
+            "requirements_hash": requirements_hash(env_desc.get("packages", {})),
+        }
+        emit(
+            "EXECUTION_ENVIRONMENT",
+            f"[Phase 3] 실행 환경: {repro_env.get('env_name', '?')} · "
+            f"Python {repro_env.get('python_version', '?')} · device {device} · "
+            f"{len(env_desc.get('packages', {}))} pkgs (fp {repro_env.get('requirements_hash') or 'n/a'})",
+            repro_env,
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to capture reproducibility metadata")
+
     while True:
         if cancel and cancel.is_cancelled:
             return ExecutorResult(success=False, stderr_tail="Cancelled")
@@ -330,7 +543,10 @@ def run_execution_phase(
             {"attempt": attempt, "entry_point": entry_point},
         )
 
-        run_result = _run_script(entry_point, workspace_root, EXPERIMENT_TIMEOUT_SECS, emit=emit)
+        run_result = _run_script(
+            entry_point, workspace_root, EXPERIMENT_TIMEOUT_SECS,
+            emit=emit, python_exe=resolved_python,
+        )
 
         if run_result["return_code"] == 0:
             rj = run_result.get("result_json", {})
@@ -349,33 +565,31 @@ def run_execution_phase(
                 )
                 run_result = {**run_result, "return_code": -3, "stderr_tail": error_msg}
             else:
-                # L3: numeric metric 없으면 advisory 경고 (실패 처리는 하지 않음)
-                has_numeric = any(
-                    isinstance(v, (int, float)) and not isinstance(v, bool)
-                    for k, v in metrics.items()
-                    if k not in ("success", "execution_success")
-                )
-                if not has_numeric:
-                    emit(
-                        "AGENT_MESSAGE",
-                        "[Phase 3] Warning: result.json has no numeric metrics. Results may be incomplete.",
-                        {"no_metrics_warning": True},
-                    )
+                # L3 / A3: 계약 검증 — 실행 결과를 계획·기대와 대조해 불일치를 표면화.
+                # (실패로 강제 전환하지 않음. 이벤트 emit + contract_check 메타 첨부만.)
+                contract = check_contract(plan, metrics)
+                _emit_contract_events(contract, emit, attempt)
+
+                # contract_check 요약을 metrics(=반환 metrics)에 첨부해 Phase 4/게이트가
+                # 후속 판정에 활용할 수 있게 한다. 원본 result.json 파일은 건드리지 않는다.
+                metrics_out = {**metrics, "contract_check": contract}
 
                 artifact_paths = _collect_artifacts(workspace_root)
                 emit(
                     "AGENT_MESSAGE",
                     f"[Phase 3] Experiment succeeded. Metrics: {_fmt_metrics(metrics)}",
-                    {"success": True, "metrics": metrics, "attempt": attempt},
+                    {"success": True, "metrics": metrics, "attempt": attempt,
+                     "contract_violations": [v["type"] for v in contract["violations"]]},
                 )
                 return ExecutorResult(
                     success=True,
                     return_code=0,
-                    metrics=metrics,
+                    metrics=metrics_out,
                     artifact_paths=artifact_paths,
                     stdout_tail=run_result["stdout_tail"],
                     stderr_tail=run_result["stderr_tail"],
                     result_json_path=run_result.get("result_json_path", ""),
+                    environment=repro_env,
                 )
 
         # ── Failure path (rc != 0 또는 L2 실패) ─────────────────────────────

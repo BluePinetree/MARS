@@ -271,6 +271,8 @@ class ExecutorResult(BaseModel):
     stderr_tail: str = ""
     duration_s: float = 0.0
     result_json_path: str = ""
+    # 재현성 메타데이터(python/env/pkg 버전/entry_command/device/seed) — P1-3
+    environment: dict[str, Any] = {}
 
 
 class SectionResult(BaseModel):
