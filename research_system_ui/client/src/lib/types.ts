@@ -15,6 +15,7 @@ export type EventType =
   | 'CODE_BLOCK'
   | 'EXPERIMENT_START'
   | 'EXPERIMENT_RESULT'
+  | 'EXECUTION_ENVIRONMENT'
   | 'USER_QUESTION'
   | 'PHASE_START'
   | 'PHASE_COMPLETE'
@@ -83,6 +84,22 @@ export interface PreflightPayload {
   default: string;
   timeout_secs: number;
   options: string[];
+  /** 선택지형(칩/라디오) 후보 답변. 첫 항목=권장. 비면 자유 입력만 표시. */
+  choices?: string[];
+}
+
+// 재현성 실행 환경 메타데이터 (EXECUTION_ENVIRONMENT 이벤트 metadata / result_summary.environment)
+export interface ReproEnvironmentPayload {
+  env_name?: string;
+  executable?: string;
+  python_version?: string;
+  python_full?: string;
+  platform?: string;
+  device?: string;
+  seed?: number;
+  entry_command?: string;
+  requirements_hash?: string;
+  packages?: Record<string, string>;
 }
 
 export interface TokenBudgetPayload {

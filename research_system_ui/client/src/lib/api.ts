@@ -66,12 +66,31 @@ export interface StartResearchRequest {
   time_limit?: number;
   frameworks?: string[];
   constraints?: string[];
+  /** P1-3: 설정 시점에 선택한 실행 환경(python 실행파일 경로). 미지정 시 서버 인터프리터. */
+  environment?: string;
 }
 
 export interface StartResearchResponse {
   run_id: string;
   session_id: string;
   status: string;
+}
+
+// P1-3: 실행 환경 선택 (재현성)
+export interface EnvironmentOption {
+  name: string;
+  executable: string;
+  python_version: string | null;
+  suitable: boolean;
+  missing: string[];
+  is_current: boolean;
+  recommended?: boolean;
+}
+
+export interface EnvironmentListResponse {
+  environments: EnvironmentOption[];
+  current_executable: string;
+  count: number;
 }
 
 export interface DeleteSessionResponse {
@@ -160,6 +179,11 @@ export async function startResearch(payload: StartResearchRequest): Promise<Star
 
 export async function getStatus(runId: string): Promise<RunStatusResponse> {
   return requestJson<RunStatusResponse>(`/api/v1/research/${encodeURIComponent(runId)}/status`);
+}
+
+export async function getEnvironments(refresh = false): Promise<EnvironmentListResponse> {
+  const query = refresh ? '?refresh=true' : '';
+  return requestJson<EnvironmentListResponse>(`/api/v1/environments${query}`);
 }
 
 export function streamLogs(runId: string, handlers: StreamHandlers = {}): () => void {

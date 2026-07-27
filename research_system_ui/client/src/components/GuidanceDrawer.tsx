@@ -37,6 +37,10 @@ export default function GuidanceDrawer({
   const filePath = payload.entry ?? '';
   const shortPath = filePath.split(/[\\/]/).slice(-3).join('/');
 
+  // 액션 동사(continue/skip 등)는 버튼으로 이미 처리 → options 중 "의미 있는 수리 제안"만 칩으로 노출.
+  const ACTION_VERBS = new Set(['continue', 'skip', 'provide_fix', 'manual_edit']);
+  const fixChoices = (payload.options ?? []).filter((o) => !ACTION_VERBS.has(o));
+
   async function handleAction(action: 'continue' | 'skip' | 'provide_fix') {
     setLoading(true);
     setError('');
@@ -108,15 +112,41 @@ export default function GuidanceDrawer({
             </div>
           )}
 
+          {/* 제안된 수리 선택지 (백엔드가 fix 후보를 보낼 때 노출) */}
+          {fixChoices.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide">제안된 수리 (클릭 시 힌트로)</p>
+              <div className="flex flex-col gap-1.5">
+                {fixChoices.map((c, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setHint(c)}
+                    className={`text-left rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
+                      hint === c ? 'border-primary bg-primary/10' : 'border-border/50 bg-background hover:bg-muted/50'
+                    }`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* 힌트 입력 */}
           <div className="space-y-1.5">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-wide">힌트 (선택)</p>
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wide">힌트 (선택 · 직접 입력)</p>
             <Textarea
               placeholder="어떻게 고칠지 알고 있다면 입력하세요"
               value={hint}
               onChange={(e) => setHint(e.target.value)}
               className="text-xs resize-none h-20 bg-background"
             />
+          </div>
+
+          {/* 건너뛰기 경고 (HITL: 무엇이 잘못될 수 있나) */}
+          <div className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-[11px] text-amber-700 leading-relaxed">
+            <span className="font-semibold">건너뛰기 주의:</span> 이 파일을 건너뛰면 여기에 의존하는 다른 파일도 실패할 수 있습니다.
           </div>
 
           {error && <p className="text-xs text-red-500">{error}</p>}

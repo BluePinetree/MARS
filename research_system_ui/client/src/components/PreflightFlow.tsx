@@ -5,7 +5,7 @@
 import { useEffect, useCallback } from 'react';
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Clock, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { Clock, ChevronRight, CheckCircle2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
@@ -20,9 +20,13 @@ interface PreflightFlowProps {
 }
 
 export default function PreflightFlow({ runId, payload, onResolved }: PreflightFlowProps) {
+  const choices = payload.choices ?? [];
+  const hasChoices = choices.length > 0;
   const [answer, setAnswer] = useState('');
   const [loading, setLoading] = useState(false);
   const [usedDefault, setUsedDefault] = useState(false);
+  // 선택지 인덱스 또는 'custom'(직접 입력). 첫 항목(0)을 권장값으로 pre-select.
+  const [selectedIdx, setSelectedIdx] = useState<number | 'custom'>(0);
 
   const handleExpire = useCallback(() => {
     setUsedDefault(true);
@@ -35,16 +39,17 @@ export default function PreflightFlow({ runId, payload, onResolved }: PreflightF
   useEffect(() => {
     setAnswer('');
     setUsedDefault(false);
+    setSelectedIdx(0);
     start();
   }, [payload.question_key, start]);
 
-  async function handleSubmit(useDefault: boolean) {
+  async function submitHint(hint: string) {
     setLoading(true);
     try {
       await provideGuidance(runId, {
         file_path: `preflight_${payload.question_key}`,
         user_action: 'provide_fix',
-        hint: useDefault ? payload.default : (answer.trim() || payload.default),
+        hint: hint.trim() || payload.default,
       });
       onResolved();
     } catch {
@@ -54,6 +59,17 @@ export default function PreflightFlow({ runId, payload, onResolved }: PreflightF
       setLoading(false);
     }
   }
+
+  // "이대로 진행": 선택된 칩(또는 직접 입력값)을 힌트로 제출
+  function handleContinue() {
+    if (hasChoices && selectedIdx !== 'custom') {
+      submitHint(choices[selectedIdx] ?? payload.default);
+    } else {
+      submitHint(answer);
+    }
+  }
+
+  const canContinue = !loading && (!hasChoices || selectedIdx !== 'custom' || answer.trim().length > 0);
 
   const timeRatio = 1 - ratio;
   const isUrgent = remaining <= 10;
@@ -95,22 +111,80 @@ export default function PreflightFlow({ runId, payload, onResolved }: PreflightF
             {/* 질문 */}
             <p className="text-sm leading-relaxed text-foreground">{payload.question}</p>
 
-            {/* 기본값 미리보기 */}
-            <div className="rounded-lg bg-muted/50 border border-border/40 px-3 py-2.5 text-xs text-muted-foreground font-mono">
-              <span className="text-muted-foreground/60 mr-2">기본값:</span>
-              {payload.default}
-            </div>
-
-            {/* 답변 입력 */}
-            <Textarea
-              placeholder="내 답변 입력..."
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              className="text-sm resize-none h-20 bg-background border-border/50 focus:border-primary/50"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleSubmit(false);
-              }}
-            />
+            {/* 선택지(칩/라디오) 또는 자유 입력 */}
+            {hasChoices ? (
+              <div className="space-y-2">
+                <div className="flex flex-col gap-1.5" role="radiogroup" aria-label="답변 선택">
+                  {choices.map((c, i) => {
+                    const active = selectedIdx === i;
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => setSelectedIdx(i)}
+                        className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-mono transition-colors ${
+                          active
+                            ? 'border-primary bg-primary/10 text-foreground'
+                            : 'border-border/50 bg-background hover:bg-muted/50 text-muted-foreground'
+                        }`}
+                      >
+                        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${active ? 'border-primary bg-primary text-primary-foreground' : 'border-border'}`}>
+                          {active && <Check size={11} />}
+                        </span>
+                        <span className="flex-1">{c}</span>
+                        {i === 0 && <span className="text-[10px] text-emerald-500 shrink-0">추천</span>}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selectedIdx === 'custom'}
+                    onClick={() => setSelectedIdx('custom')}
+                    className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-mono transition-colors ${
+                      selectedIdx === 'custom'
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border/50 bg-background hover:bg-muted/50 text-muted-foreground'
+                    }`}
+                  >
+                    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${selectedIdx === 'custom' ? 'border-primary bg-primary text-primary-foreground' : 'border-border'}`}>
+                      {selectedIdx === 'custom' && <Check size={11} />}
+                    </span>
+                    <span className="flex-1">직접 입력…</span>
+                  </button>
+                </div>
+                {selectedIdx === 'custom' && (
+                  <Textarea
+                    placeholder="답변을 직접 입력..."
+                    value={answer}
+                    onChange={(e) => setAnswer(e.target.value)}
+                    autoFocus
+                    className="text-sm resize-none h-16 bg-background border-border/50 focus:border-primary/50"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleContinue();
+                    }}
+                  />
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="rounded-lg bg-muted/50 border border-border/40 px-3 py-2.5 text-xs text-muted-foreground font-mono">
+                  <span className="text-muted-foreground/60 mr-2">추천:</span>
+                  {payload.default}
+                </div>
+                <Textarea
+                  placeholder="내 답변 입력..."
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                  className="text-sm resize-none h-20 bg-background border-border/50 focus:border-primary/50"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleContinue();
+                  }}
+                />
+              </>
+            )}
 
             {/* 타임아웃 프로그레스 바 */}
             <Progress
@@ -118,7 +192,7 @@ export default function PreflightFlow({ runId, payload, onResolved }: PreflightF
               className={`h-1 transition-colors ${isUrgent ? '[&>div]:bg-red-500' : '[&>div]:bg-amber-400'}`}
             />
             <p className="text-[11px] text-muted-foreground text-right font-mono -mt-2">
-              {remaining}초 후 기본값으로 진행
+              {remaining}초 후 추천값으로 진행
             </p>
 
             {/* 버튼 */}
@@ -128,18 +202,18 @@ export default function PreflightFlow({ runId, payload, onResolved }: PreflightF
                 size="sm"
                 className="flex-1 text-xs font-mono"
                 disabled={loading}
-                onClick={() => handleSubmit(true)}
+                onClick={() => submitHint(payload.default)}
               >
-                기본값으로 진행
+                추천값으로 진행
               </Button>
               <Button
                 size="sm"
                 className="flex-1 text-xs font-mono gap-1.5"
-                disabled={loading || !answer.trim()}
-                onClick={() => handleSubmit(false)}
+                disabled={!canContinue}
+                onClick={handleContinue}
               >
                 <ChevronRight size={12} />
-                이 답변으로 계속
+                이대로 진행
               </Button>
             </div>
           </div>

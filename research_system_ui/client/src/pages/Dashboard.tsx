@@ -8,6 +8,7 @@ import {
   ArrowRight,
   ChevronDown,
   ChevronUp,
+  Cpu,
   GitCompare,
   Plus,
   Radio,
@@ -25,7 +26,13 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { getSessions, type StartResearchRequest } from '@/lib/api';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import {
+  getSessions,
+  getEnvironments,
+  type StartResearchRequest,
+  type EnvironmentOption,
+} from '@/lib/api';
 import type { LogEvent, Session } from '@/lib/types';
 import {
   analyzeLogEvents,
@@ -60,6 +67,7 @@ interface ResearchFormState {
   outputPath: string;
   dataPath: string;
   dataDescription: string;
+  environment: string;
 }
 
 const initialFormState: ResearchFormState = {
@@ -72,6 +80,7 @@ const initialFormState: ResearchFormState = {
   outputPath: './outputs',
   dataPath: '',
   dataDescription: '',
+  environment: '',
 };
 
 export default function Dashboard({
@@ -121,6 +130,11 @@ export default function Dashboard({
   const [deletingRunIds, setDeletingRunIds] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [form, setForm] = useState<ResearchFormState>(initialFormState);
+  // P1-3: 실행 환경(재현성) 선택
+  const [environments, setEnvironments] = useState<EnvironmentOption[]>([]);
+  const [envLoading, setEnvLoading] = useState(false);
+  const [envError, setEnvError] = useState('');
+  const [envCustom, setEnvCustom] = useState(false);
 
   const canSubmit = useMemo(
     () => !!form.topic.trim() && !isSubmitting,
@@ -163,6 +177,10 @@ export default function Dashboard({
     if (form.dataDescription.trim()) {
       payload.data_description = form.dataDescription.trim();
     }
+    const env = form.environment.trim();
+    if (env) {
+      payload.environment = env;
+    }
 
     try {
       await onStartResearch(payload);
@@ -197,6 +215,48 @@ export default function Dashboard({
       window.clearInterval(intervalId);
     };
   }, [onSessionsUpdate]);
+
+  // P1-3: 다이얼로그가 열릴 때 적합한 실행 환경 목록을 조회하고 추천 환경을 미리 선택한다.
+  useEffect(() => {
+    if (!isCreateDialogOpen) {
+      return;
+    }
+    let active = true;
+    setEnvLoading(true);
+    setEnvError('');
+    getEnvironments()
+      .then((res) => {
+        if (!active) {
+          return;
+        }
+        setEnvironments(res.environments);
+        const recommended = res.environments.find((e) => e.recommended) ?? res.environments[0];
+        if (recommended) {
+          setEnvCustom(false);
+          setForm((prev) => ({ ...prev, environment: recommended.executable }));
+        } else {
+          setEnvCustom(true);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setEnvError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setEnvLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [isCreateDialogOpen]);
+
+  // P1-3: 대시보드 진입 시 env 목록 캐시를 미리 데워 다이얼로그 오픈을 빠르게 한다(fire-and-forget).
+  useEffect(() => {
+    getEnvironments().catch(() => {});
+  }, []);
 
   const handleDeleteSession = async (runId: string) => {
     const target = sessions.find((session) => session.run_id === runId);
@@ -327,10 +387,27 @@ export default function Dashboard({
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div className="space-y-2">
                           <label className="text-xs font-mono text-muted-foreground">연구 분야</label>
+                          <ToggleGroup
+                            type="single"
+                            value={['컴퓨터 비전', '정형 데이터', '시계열', 'NLP'].includes(form.domain) ? form.domain : ''}
+                            onValueChange={(v: string) => { if (v) handleFormChange('domain', v); }}
+                            disabled={isSubmitting}
+                            className="flex flex-wrap justify-start gap-1.5"
+                          >
+                            {['컴퓨터 비전', '정형 데이터', '시계열', 'NLP'].map((d) => (
+                              <ToggleGroupItem
+                                key={d}
+                                value={d}
+                                className="rounded-md border border-border/50 px-2.5 py-1 text-xs font-mono data-[state=on]:border-primary data-[state=on]:bg-primary/15 data-[state=on]:text-foreground"
+                              >
+                                {d}
+                              </ToggleGroupItem>
+                            ))}
+                          </ToggleGroup>
                           <Input
                             value={form.domain}
                             onChange={(e) => handleFormChange('domain', e.target.value)}
-                            placeholder="예: 컴퓨터 비전"
+                            placeholder="위에서 선택하거나 직접 입력"
                             disabled={isSubmitting}
                           />
                         </div>
@@ -369,13 +446,112 @@ export default function Dashboard({
                       </div>
 
                       <div className="space-y-2">
-                        <label className="text-xs font-mono text-muted-foreground">선호 프레임워크 (쉼표 구분)</label>
-                        <Input
-                          value={form.preferredFrameworks}
-                          onChange={(e) => handleFormChange('preferredFrameworks', e.target.value)}
-                          placeholder="예: PyTorch, scikit-learn"
+                        <label className="text-xs font-mono text-muted-foreground">선호 프레임워크 (복수 선택)</label>
+                        <ToggleGroup
+                          type="multiple"
+                          value={form.preferredFrameworks.split(',').map((s) => s.trim()).filter(Boolean)}
+                          onValueChange={(v: string[]) => handleFormChange('preferredFrameworks', v.join(', '))}
                           disabled={isSubmitting}
-                        />
+                          className="flex flex-wrap justify-start gap-1.5"
+                        >
+                          {['PyTorch', 'scikit-learn', 'XGBoost', 'LightGBM', 'timm', 'TensorFlow'].map((fw) => (
+                            <ToggleGroupItem
+                              key={fw}
+                              value={fw}
+                              aria-label={fw}
+                              className="rounded-md border border-border/50 px-2.5 py-1 text-xs font-mono data-[state=on]:border-primary data-[state=on]:bg-primary/15 data-[state=on]:text-foreground"
+                            >
+                              {fw}
+                            </ToggleGroupItem>
+                          ))}
+                        </ToggleGroup>
+                        <p className="text-[11px] text-muted-foreground/70">실험 코드 생성에 쓸 라이브러리를 선택하세요. 자유입력 대신 선택으로 표기 오타를 방지합니다.</p>
+                      </div>
+
+                      {/* 실행 환경 (재현성) — 능력 기반 적합 env 선택 */}
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
+                          <Cpu size={12} /> 실행 환경 (재현성)
+                        </label>
+                        {envLoading ? (
+                          <p className="text-[11px] font-mono text-muted-foreground/70">적합한 가상환경 탐색 중…</p>
+                        ) : envError ? (
+                          <p className="text-[11px] font-mono text-red-400">환경 목록을 불러오지 못했습니다: {envError}</p>
+                        ) : environments.length === 0 ? (
+                          <div className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-[11px] leading-relaxed text-amber-700">
+                            적합한 가상환경을 찾지 못했습니다. 필수 패키지(crewai · torch · scikit-learn · pandas · python-dotenv)를 갖춘 conda 환경을 만든 뒤 다시 열거나, 아래에 python 실행파일 경로를 직접 입력하세요.
+                          </div>
+                        ) : (
+                          <div role="radiogroup" className="flex flex-col gap-1.5">
+                            {environments.map((e) => {
+                              const checked = !envCustom && form.environment === e.executable;
+                              return (
+                                <button
+                                  key={e.executable}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={checked}
+                                  disabled={isSubmitting}
+                                  onClick={() => {
+                                    setEnvCustom(false);
+                                    handleFormChange('environment', e.executable);
+                                  }}
+                                  className={`text-left rounded-md border px-2.5 py-1.5 transition-colors ${
+                                    checked ? 'border-primary bg-primary/10' : 'border-border/50 bg-background hover:bg-muted/50'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <span className={`inline-flex h-3 w-3 items-center justify-center rounded-full border ${checked ? 'border-primary' : 'border-muted-foreground/40'}`}>
+                                      {checked && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                                    </span>
+                                    <span className="text-xs font-mono font-semibold text-foreground">{e.name}</span>
+                                    {e.python_version && (
+                                      <span className="text-[10px] font-mono text-muted-foreground">Python {e.python_version}</span>
+                                    )}
+                                    {e.recommended && (
+                                      <span className="rounded border border-primary/30 bg-primary/15 px-1 py-0.5 text-[9px] font-mono text-primary">추천</span>
+                                    )}
+                                    {e.is_current && (
+                                      <span className="rounded border border-border/50 bg-muted px-1 py-0.5 text-[9px] font-mono text-muted-foreground">현재</span>
+                                    )}
+                                  </div>
+                                  <p className="mt-0.5 pl-5 text-[10px] font-mono text-muted-foreground/70 truncate">{e.executable}</p>
+                                </button>
+                              );
+                            })}
+                            <button
+                              type="button"
+                              role="radio"
+                              aria-checked={envCustom}
+                              disabled={isSubmitting}
+                              onClick={() => {
+                                setEnvCustom(true);
+                                handleFormChange('environment', '');
+                              }}
+                              className={`text-left rounded-md border px-2.5 py-1.5 transition-colors ${
+                                envCustom ? 'border-primary bg-primary/10' : 'border-border/50 bg-background hover:bg-muted/50'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={`inline-flex h-3 w-3 items-center justify-center rounded-full border ${envCustom ? 'border-primary' : 'border-muted-foreground/40'}`}>
+                                  {envCustom && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                                </span>
+                                <span className="text-xs font-mono text-foreground">직접 경로 입력…</span>
+                              </div>
+                            </button>
+                          </div>
+                        )}
+                        {(envCustom || environments.length === 0) && !envLoading && (
+                          <Input
+                            value={form.environment}
+                            onChange={(e) => handleFormChange('environment', e.target.value)}
+                            placeholder="python 실행파일 절대경로"
+                            disabled={isSubmitting}
+                          />
+                        )}
+                        <p className="text-[11px] text-muted-foreground/70">
+                          실험을 실행할 Python 환경. 선택 시 재현성 메타데이터(버전 · 패키지 지문)가 결과에 기록됩니다. 미지정 시 서버 기본 환경을 사용합니다.
+                        </p>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

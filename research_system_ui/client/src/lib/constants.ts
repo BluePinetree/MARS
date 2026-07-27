@@ -72,6 +72,7 @@ export const EVENT_TYPE_CONFIG: Record<EventType, { label: string; icon: string 
   CODE_BLOCK: { label: '코드 블록', icon: 'Code' },
   EXPERIMENT_START: { label: '실험 시작', icon: 'FlaskConical' },
   EXPERIMENT_RESULT: { label: '실험 결과', icon: 'BarChart3' },
+  EXECUTION_ENVIRONMENT: { label: '실행 환경', icon: 'Cpu' },
   USER_QUESTION: { label: '사용자 질문', icon: 'HelpCircle' },
   PHASE_START: { label: '단계 시작', icon: 'ChevronRight' },
   PHASE_COMPLETE: { label: '단계 완료', icon: 'CheckCircle2' },

@@ -131,6 +131,7 @@ export default function SessionView({
       default: String(meta?.default ?? ''),
       timeout_secs: Number(meta?.timeout_secs ?? 60),
       options: (meta?.options as string[]) ?? [],
+      choices: (meta?.choices as string[]) ?? [],
     });
   }, []);
 

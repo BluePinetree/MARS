@@ -11,7 +11,7 @@ import {
   Play, Square, Brain, MessageSquare, Wrench,
   FileText, Code, FlaskConical, BarChart3, HelpCircle, CheckCircle2,
   ChevronDown, ChevronRight, Copy, Check, ExternalLink,
-  AlertTriangle, AlertOctagon, Lightbulb, Terminal,
+  AlertTriangle, AlertOctagon, Lightbulb, Terminal, Cpu,
 } from 'lucide-react';
 import type { LogEvent } from '@/lib/types';
 import { getAgentColor, formatTimestamp } from '@/lib/constants';
@@ -37,6 +37,7 @@ function EventIcon({ type, className }: { type: string; className?: string }) {
     case 'CODE_BLOCK': return <Code {...iconProps} />;
     case 'EXPERIMENT_START': return <FlaskConical {...iconProps} />;
     case 'EXPERIMENT_RESULT': return <BarChart3 {...iconProps} />;
+    case 'EXECUTION_ENVIRONMENT': return <Cpu {...iconProps} />;
     case 'USER_QUESTION': return <HelpCircle {...iconProps} />;
     case 'PHASE_COMPLETE': return <CheckCircle2 {...iconProps} />;
     default: return <MessageSquare {...iconProps} />;
@@ -633,6 +634,52 @@ function ProposalTrigger({ event }: { event: LogEvent }) {
 
 type EventRenderer = React.ComponentType<{ event: LogEvent; onClick?: () => void }>;
 
+// ─── EXECUTION_ENVIRONMENT (재현성) ───
+function ExecutionEnvironment({ event }: { event: LogEvent }) {
+  const m = (event.metadata ?? {}) as Record<string, unknown>;
+  const pkgs = (m.packages ?? {}) as Record<string, string>;
+  const str = (v: unknown, d = '') => (typeof v === 'string' ? v : d);
+  const envName = str(m.env_name, '?');
+  const pyVer = str(m.python_version, '?');
+  const device = str(m.device, 'cpu');
+  const fp = str(m.requirements_hash);
+  const entryCmd = str(m.entry_command);
+  const highlight = ['torch', 'crewai', 'numpy', 'scikit-learn', 'torchvision', 'timm'];
+  const chips = highlight.filter((k) => pkgs[k]).map((k) => `${k} ${pkgs[k]}`);
+  return (
+    <motion.div {...slideIn} className="px-4 py-2">
+      <div className="rounded-lg border border-cyan-200/60 bg-cyan-50/40 px-3 py-2.5 font-mono">
+        <div className="flex items-center gap-2 mb-1.5">
+          <Cpu size={13} className="text-cyan-600" />
+          <span className="text-xs font-semibold text-cyan-700">실행 환경 · 재현성</span>
+          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-700 border border-cyan-200">
+            {device.toUpperCase()}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-foreground/80">
+          <span><span className="text-muted-foreground">env</span> {envName}</span>
+          <span><span className="text-muted-foreground">Python</span> {pyVer}</span>
+          {fp && <span><span className="text-muted-foreground">fingerprint</span> {fp}</span>}
+        </div>
+        {chips.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {chips.map((c) => (
+              <span key={c} className="text-[10px] px-1.5 py-0.5 rounded bg-background border border-border/50 text-muted-foreground">
+                {c}
+              </span>
+            ))}
+          </div>
+        )}
+        {entryCmd && (
+          <code className="mt-1.5 block text-[10px] text-cyan-800/80 bg-background/70 border border-border/40 rounded px-2 py-1 break-all">
+            {entryCmd}
+          </code>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
 const EVENT_RENDERERS: Record<string, EventRenderer | null> = {
   SYSTEM_START:            ({ event }) => <SystemBanner event={event} />,
   SYSTEM_END:              ({ event }) => <SystemBanner event={event} />,
@@ -653,6 +700,7 @@ const EVENT_RENDERERS: Record<string, EventRenderer | null> = {
   CODE_BLOCK:              CodeBlock,
   EXPERIMENT_START:        ({ event }) => <ExperimentStart event={event} />,
   EXPERIMENT_RESULT:       ExperimentResult,
+  EXECUTION_ENVIRONMENT:   ({ event }) => <ExecutionEnvironment event={event} />,
   USER_QUESTION:           ({ event }) => <UserQuestion event={event} />,
   PHASE_COMPLETE:          ({ event }) => <PhaseComplete event={event} />,
   SECTION_DRAFT_DONE:      ({ event }) => <SectionDone event={event} />,
