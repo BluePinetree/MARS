@@ -21,6 +21,8 @@ class ResearchRequest(BaseModel):
     data_description: str | None = None
     frameworks: list[str] | None = None
     constraints: list[str] | None = None
+    # P1-3: 설정 시점에 선택한 실행 환경(python 실행파일 경로). 미지정 시 서버 인터프리터 사용.
+    environment: str | None = None
 
     def to_coordinator_input(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)

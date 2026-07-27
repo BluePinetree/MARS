@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.artifacts import router as artifacts_router
+from api.routes.environments import router as environments_router
 from api.routes.interaction import router as interaction_router
 from api.routes.research import router as research_router
 from api.routes.sessions import router as sessions_router
@@ -35,5 +36,6 @@ def create_app(services) -> FastAPI:
     app.include_router(interaction_router)
     app.include_router(artifacts_router)
     app.include_router(sessions_router)
+    app.include_router(environments_router)
     return app
 
