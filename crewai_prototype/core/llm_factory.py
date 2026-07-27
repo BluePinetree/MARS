@@ -105,16 +105,13 @@ def create_llm_for_agent(
     # (Phase 2 코딩은 이미 crew tool을 쓰지 않고 직접 LLM 호출로 전환됨(ADR-001),
     #  Phase 4 writer의 배칭 문제는 프롬프트 포맷으로 별도 완화되어 있음)
 
-    # LiteLLM retry: 429/529 에러 시 최대 5회 자동 재시도 (litellm 네이티브 파라미터)
-    llm_kwargs["num_retries"] = 5
-
-    # is_litellm=True 로 crewai 1.x 네이티브 프로바이더를 우회하고 LiteLLM 라우팅을 강제한다.
-    # 이 코드베이스는 "CrewAI가 내부적으로 litellm을 사용"하던 시절에 작성되어
-    # num_retries / parallel_tool_calls 같은 파라미터를 넘긴다. 그러나 crewai 1.14.3의
-    # 네이티브 OpenAI 프로바이더는 이들을 raw openai>=2.x SDK로 그대로 전달해
-    # TypeError(num_retries) / 400(parallel_tool_calls without tools)을 유발한다.
-    # LiteLLM 경로는 이 파라미터들을 올바르게 해석/제거하므로 회귀를 방지한다.
-    llm = LLM(is_litellm=True, **llm_kwargs)
+    # crewai 네이티브 프로바이더 경로를 그대로 사용한다 (litellm 우회 없음).
+    # 과거 num_retries / parallel_tool_calls 를 llm_kwargs에 주입했으나, 네이티브
+    # OpenAI 프로바이더가 이 값들을 openai>=2.x SDK의 create()로 그대로 전달해
+    # TypeError(num_retries) / 400(parallel_tool_calls without tools)을 유발했다.
+    # 두 파라미터를 애초에 주입하지 않으면 네이티브 경로가 정상 동작하므로,
+    # is_litellm 강제나 별도 우회 없이 표준 kwargs만으로 LLM을 생성한다.
+    llm = LLM(**llm_kwargs)
 
     return llm
 
@@ -173,7 +170,7 @@ def make_reasoning_llm(
         if api_key:
             kwargs["api_key"] = api_key
 
-        return LLM(is_litellm=True, **kwargs)
+        return LLM(**kwargs)
     except Exception:
         return base_llm
 
