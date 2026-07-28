@@ -40,6 +40,7 @@ EVENT_TYPES = (
     "PLAN_AWAITING_APPROVAL",
     "USER_GUIDANCE_NEEDED",
     "USER_GUIDANCE_RECEIVED",
+    "DATA_NEEDED",
     "SECTION_DRAFT_DONE",
     # Preflight clarification events
     "PREFLIGHT_QUESTION",

@@ -208,6 +208,26 @@ PRESETS = {
         ),
         "domain": "computer vision",
     },
+    # S1 — Vision classification, 경량 (GPU, CIFAR-10 캐시)
+    "vision_cifar10": {
+        "topic": "CIFAR-10 이미지 분류: ResNet-18 vs MobileNetV2 정확도·파라미터 효율 비교",
+        "goal": (
+            "torchvision CIFAR-10 데이터셋(os.environ['DATA_DIR']에 이미 캐시됨, 재다운로드 금지)으로 "
+            "torchvision의 ResNet-18과 MobileNetV2를 학습해 top-1 accuracy, 학습 시간, 파라미터 수를 "
+            "비교한다. GPU(CUDA)를 사용하고 각 모델 3 epoch 학습, seed는 42로 고정한다."
+        ),
+        "domain": "computer vision",
+    },
+    # S7 — Timeseries forecasting (CPU, AirPassengers)
+    "timeseries": {
+        "topic": "월별 항공 승객 수 예측: SARIMA vs LSTM 비교",
+        "goal": (
+            "AirPassengers 데이터셋(1949-1960, 144개 월별 관측값; statsmodels 내장 또는 CSV)으로 "
+            "SARIMA와 간단한 LSTM으로 12개월 horizon을 예측하고 SMAPE, MAE, RMSE로 비교한다. "
+            "훈련/검증 백테스트 분할과 seed는 42로 고정한다. CPU만 사용."
+        ),
+        "domain": "time series forecasting",
+    },
 }
 
 

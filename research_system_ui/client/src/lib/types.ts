@@ -24,6 +24,7 @@ export type EventType =
   | 'PLAN_AWAITING_APPROVAL'
   | 'USER_GUIDANCE_NEEDED'
   | 'USER_GUIDANCE_RECEIVED'
+  | 'DATA_NEEDED'
   | 'SECTION_DRAFT_DONE'
   // Sprint 1-4 신규 이벤트
   | 'PREFLIGHT_QUESTION'

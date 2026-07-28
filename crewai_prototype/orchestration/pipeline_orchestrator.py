@@ -237,6 +237,51 @@ class PipelineOrchestrator:
                     session=prepared.session,
                 )
 
+            # ── Phase 0b: 사용자 제공 데이터 조사(도구 기반) → manifest → goal 주입 ──
+            # data_path가 있으면 폴더를 조사·압축해제·구조추론해 dataset_manifest를 만들고,
+            # 실제 경로/컬럼/클래스를 planner/designer/coder에 주입한다(눈감은 codegen 방지).
+            _md0 = getattr(prepared.session, "metadata", None) or {}
+            _dp = str(_md0.get("data_path") or "").strip()
+            _dd = str(_md0.get("data_description") or "").strip()
+            if _dp:
+                try:
+                    from orchestration.dataset_ingestor import ingest, manifest_to_context
+                    manifest = ingest(_dp, data_description=_dd, emit=emit)
+                    # 해제/추론된 실제 데이터 루트를 이후 단계(phase3 CLI/DATA_DIR)가 쓰도록 반영
+                    _md0["data_path"] = manifest.get("resolved_path") or _dp
+                    _md0["dataset_manifest"] = manifest
+                    try:
+                        hp = Path(workspace.root_dir) / "handoff"
+                        hp.mkdir(parents=True, exist_ok=True)
+                        (hp / "dataset_manifest.json").write_text(
+                            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+                        )
+                    except Exception:
+                        logger.exception("dataset_manifest 저장 실패")
+                    data_ctx = manifest_to_context(manifest)
+                except Exception as exc:
+                    logger.exception("Dataset ingest 실패: %s", exc)
+                    data_ctx = (
+                        f"USER-PROVIDED DATASET at path: {_dp} (use as dataset root; do NOT download). {_dd}"
+                    ).strip()
+                prepared = PreparedRun(
+                    run_id=prepared.run_id,
+                    session_id=prepared.session_id,
+                    research_topic=prepared.research_topic,
+                    goal=(prepared.goal or "") + "\n" + data_ctx,
+                    user_workspace_path=prepared.user_workspace_path,
+                    session=prepared.session,
+                )
+            elif _dd:
+                prepared = PreparedRun(
+                    run_id=prepared.run_id,
+                    session_id=prepared.session_id,
+                    research_topic=prepared.research_topic,
+                    goal=(prepared.goal or "") + "\nUSER DATASET NOTE: " + _dd,
+                    user_workspace_path=prepared.user_workspace_path,
+                    session=prepared.session,
+                )
+
             # ── Phase 1: Planning + Design + Approval ─────────────────────────
             if start_phase <= 1:
                 plan_bundle = run_planning_phase(
@@ -346,11 +391,14 @@ class PipelineOrchestrator:
                 # P1-3: 설정 시점에 선택된 실행 환경(python 실행파일)을 사용한다.
                 # 미지정 시 현재 서버 인터프리터로 실행(phase3가 폴백 처리).
                 run_env_python = None
+                run_data_path = None
                 try:
                     _md = getattr(prepared.session, "metadata", None) or {}
                     run_env_python = _md.get("environment") or None
+                    run_data_path = (str(_md.get("data_path") or "").strip() or None)
                 except Exception:
                     run_env_python = None
+                    run_data_path = None
                 exec_result = run_execution_phase(
                     plan=plan_bundle,
                     coding_result=coding_result,
@@ -358,6 +406,7 @@ class PipelineOrchestrator:
                     emit=emit,
                     cancel=cancel,
                     python_exe=run_env_python,
+                    data_path=run_data_path,
                 )
                 # 실패 시 패턴 감지 (escalation 판단은 run_execution_phase 내부에서 이미 처리)
                 if not exec_result.success:

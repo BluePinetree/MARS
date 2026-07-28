@@ -171,12 +171,15 @@ def _make_repair_agent(llm) -> Agent:
 
 # ── Direct subprocess execution (faster than via agent) ──────────────────────
 
-def _experiment_cmd(python_exe: str, entry_point: str, workspace_root: str) -> "list[str]":
+def _experiment_cmd(
+    python_exe: str, entry_point: str, workspace_root: str, data_path: Optional[str] = None,
+) -> "list[str]":
     """실험 서브프로세스 실행 명령을 구성한다(스캐폴드 stable main.py CLI 규약).
 
     run_execution_phase가 재현성 기록의 entry_command에도 동일 명령을 쓰도록 공용화한다.
+    data_path(사용자 제공 데이터 폴더)가 있으면 스캐폴드 CLI(--data-path/--data-root)로 전달한다.
     """
-    return [
+    cmd = [
         python_exe, entry_point,
         "--output-root", str(workspace_root),
         "--validation-tier", "full",
@@ -185,6 +188,11 @@ def _experiment_cmd(python_exe: str, entry_point: str, workspace_root: str) -> "
         "--seed", "42",
         "--device", os.environ.get("MARS_EXPERIMENT_DEVICE", "cpu"),
     ]
+    if data_path:
+        # 프로파일별로 --data_path(tabular/timeseries) 또는 --data_root(base)를 쓰므로 둘 다 전달
+        # (scaffold CLI는 parse_known_args라 해당 프로파일이 안 쓰는 인자는 안전히 무시).
+        cmd += ["--data-path", str(data_path), "--data-root", str(data_path)]
+    return cmd
 
 
 def _run_script(
@@ -193,6 +201,7 @@ def _run_script(
     timeout: int,
     emit: Optional[Callable] = None,
     python_exe: Optional[str] = None,
+    data_path: Optional[str] = None,
 ) -> dict:
     """Run the experiment script with Popen + streaming stdout.
 
@@ -203,7 +212,7 @@ def _run_script(
     # --output_root 미지정 시 기본값이 nested dir로 새어 phase3가 results/result.json을 못 찾고,
     # --validation_tier 기본값 "smoke"는 degenerate(1.0) 평가를 낳는다. 실제 평가를 위해 명시한다.
     # (scaffold cli는 parse_known_args라 비스캐폴드 entry에서도 안전하게 무시된다)
-    cmd = _experiment_cmd(python_exe or sys.executable, entry_point, str(workspace_root))
+    cmd = _experiment_cmd(python_exe or sys.executable, entry_point, str(workspace_root), data_path)
     start = time.monotonic()
     stdout_lines: list[str] = []
 
@@ -213,7 +222,12 @@ def _run_script(
         existing_path = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_path}" if existing_path else src_dir
 
-        data_dir = DATA_CACHE_DIR or str(Path.home() / ".cache" / "mars_datasets")
+        # 사용자가 데이터 폴더를 제공하면 DATA_DIR을 그 경로로(코드가 os.environ['DATA_DIR']로 읽음).
+        # 미제공 시 전역 캐시 사용(다운로드/캐시용).
+        if data_path:
+            data_dir = str(data_path)
+        else:
+            data_dir = DATA_CACHE_DIR or str(Path.home() / ".cache" / "mars_datasets")
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         env["DATA_DIR"] = data_dir
 
@@ -359,6 +373,59 @@ def _has_numeric_metric(metrics: dict) -> bool:
     return False
 
 
+# ── L4: 가짜 성공(스텁/placeholder) 탐지 ────────────────────────────────────────
+# coder(LLM)가 어려운 도메인에서 실제 구현 대신 스텁을 작성하고 execution_success=true +
+# smoke_metric=1.0을 반환하는 specification gaming을 잡는다. L2(success 플래그)·L3(numeric
+# 존재)는 이를 통과시킨다(스텁도 numeric 1개를 냄). 실제 실험이면 (1) 도메인 지표가 최소 1개
+# 있고 (2) notes가 미구현/placeholder를 자백하지 않는다.
+_DOMAIN_METRIC_TOKENS = (
+    "acc", "accuracy", "roc", "auc", "f1", "precision", "recall",
+    "rmse", "mae", "mse", "r2", "r_squared", "top1", "top5",
+    "smape", "mape", "loss", "psnr", "ssim", "bleu", "perplexity",
+    "iou", "dice", "ndcg", "mrr",
+)
+_STUB_NOTE_MARKERS = (
+    "smoke implementation", "not yet implemented", "not implemented",
+    "placeholder", "to be implemented", "todo:", "stub implementation",
+)
+_PLACEHOLDER_METRIC_KEYS = {"smoke_metric", "smoke", "dummy", "placeholder", "noop"}
+
+
+def _flatten_metric_keys(inner: dict) -> "list[str]":
+    keys: list[str] = []
+
+    def _rec(d, prefix=""):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                kk = f"{prefix}{k}"
+                keys.append(kk)
+                if isinstance(v, dict):
+                    _rec(v, kk + ".")
+
+    _rec(inner)
+    return keys
+
+
+def _is_degenerate_result(rj: dict) -> "tuple[bool, str]":
+    """rc=0·success=true 여도 '실제 실험이 아닌' 결과(스텁/placeholder)인지 판정."""
+    notes = str(rj.get("notes", "")).lower()
+    for mk in _STUB_NOTE_MARKERS:
+        if mk in notes:
+            return True, f"notes가 미구현을 자백함: '{mk}'"
+    inner = rj.get("metrics", {})
+    if not isinstance(inner, dict):
+        inner = {}
+    keys = _flatten_metric_keys(inner)
+    lk = [str(k).lower() for k in keys]
+    non_placeholder = [k for k in lk if k.rsplit(".", 1)[-1] not in _PLACEHOLDER_METRIC_KEYS]
+    if lk and not non_placeholder:
+        return True, f"placeholder 지표만 존재: {keys}"
+    has_domain = any(any(tok in k for tok in _DOMAIN_METRIC_TOKENS) for k in lk)
+    if not has_domain:
+        return True, f"도메인 지표(정확도/rmse/top1/r2 등)가 하나도 없음: {keys[:8]}"
+    return False, ""
+
+
 def _planned_epochs(plan: PlanBundle) -> Optional[int]:
     """planner/designer success_criteria 텍스트에서 계획된 epoch 수를 추출 (최댓값)."""
     texts: list[str] = []
@@ -460,6 +527,39 @@ def _emit_contract_events(contract: dict, emit: EmitFn, attempt: int) -> None:
             )
 
 
+# ── 데이터 다운로드/네트워크 실패 감지 (P0: DATA_NEEDED 게이트) ─────────────────
+_DATA_DOWNLOAD_MARKERS = (
+    "winerror 10060", "winerror 10061", "urlopen error", "urlerror",
+    "max retries exceeded", "failed to establish a new connection",
+    "temporary failure in name resolution", "getaddrinfo failed",
+    "name or service not known", "connection refused", "connection reset",
+    "connection timed out", "network is unreachable", "connectionerror",
+    "certificate verify failed", "ssl: certificate", "httperror",
+)
+_KNOWN_DATASETS = (
+    "cifar-100", "cifar100", "cifar-10", "cifar10", "imagenet", "mnist",
+    "fashion-mnist", "svhn", "coco", "sst-2", "sst2", "imdb", "airpassengers",
+)
+
+
+def _is_data_download_failure(stderr: str) -> bool:
+    """stderr가 데이터 다운로드/네트워크 실패를 나타내는지(코드 수정으로 못 고침 → 수동 배치 안내)."""
+    s = (stderr or "").lower()
+    return any(m in s for m in _DATA_DOWNLOAD_MARKERS)
+
+
+def _guess_dataset_name(plan: PlanBundle) -> str:
+    """topic/goal에서 데이터셋 이름을 추정(안내 메시지용)."""
+    texts = " ".join(
+        str(getattr(getattr(plan, "planner", None), attr, "") or "")
+        for attr in ("problem_statement", "research_topic", "goal")
+    ).lower()
+    for name in _KNOWN_DATASETS:
+        if name in texts:
+            return name
+    return "the required dataset"
+
+
 # ── Phase 3 main function ─────────────────────────────────────────────────────
 
 def run_execution_phase(
@@ -470,6 +570,7 @@ def run_execution_phase(
     llm=None,
     cancel: Optional[CancellationToken] = None,
     python_exe: Optional[str] = None,
+    data_path: Optional[str] = None,
 ) -> ExecutorResult:
     """Run the experiment and collect results. Escalates to user on persistent failure.
 
@@ -518,7 +619,7 @@ def run_execution_phase(
             "device": device,
             "seed": 42,
             "entry_command": " ".join(
-                _experiment_cmd(resolved_python, entry_point, str(workspace_root))
+                _experiment_cmd(resolved_python, entry_point, str(workspace_root), data_path)
             ),
             "requirements_hash": requirements_hash(env_desc.get("packages", {})),
         }
@@ -545,7 +646,7 @@ def run_execution_phase(
 
         run_result = _run_script(
             entry_point, workspace_root, EXPERIMENT_TIMEOUT_SECS,
-            emit=emit, python_exe=resolved_python,
+            emit=emit, python_exe=resolved_python, data_path=data_path,
         )
 
         if run_result["return_code"] == 0:
@@ -565,35 +666,102 @@ def run_execution_phase(
                 )
                 run_result = {**run_result, "return_code": -3, "stderr_tail": error_msg}
             else:
-                # L3 / A3: 계약 검증 — 실행 결과를 계획·기대와 대조해 불일치를 표면화.
-                # (실패로 강제 전환하지 않음. 이벤트 emit + contract_check 메타 첨부만.)
-                contract = check_contract(plan, metrics)
-                _emit_contract_events(contract, emit, attempt)
+                # L4: 가짜 성공(스텁/placeholder) 탐지 — rc=0·success=true 여도 실제 실험이
+                # 아니면(스텁, 도메인 지표 부재) 실패로 재분류해 수리 루프를 유도한다.
+                degenerate, reason = _is_degenerate_result(metrics)
+                if degenerate:
+                    emit(
+                        "AGENT_MESSAGE",
+                        f"[Phase 3] rc=0·success=true 이지만 실제 실험 결과가 아님(스텁/placeholder) "
+                        f"— 실패 처리: {reason}",
+                        {"degenerate_success": True, "reason": reason, "attempt": attempt},
+                    )
+                    run_result = {
+                        **run_result,
+                        "return_code": -4,
+                        "stderr_tail": (
+                            f"Degenerate/stub result rejected: {reason}. "
+                            "experiment_impl.py must implement the REAL experiment and report "
+                            "domain metrics (accuracy/rmse/top1/r2/...). Do NOT return smoke_metric "
+                            "or a placeholder/'not implemented' stub."
+                        ),
+                    }
+                else:
+                    # L3 / A3: 계약 검증 — 실행 결과를 계획·기대와 대조해 불일치를 표면화.
+                    # (실패로 강제 전환하지 않음. 이벤트 emit + contract_check 메타 첨부만.)
+                    contract = check_contract(plan, metrics)
+                    _emit_contract_events(contract, emit, attempt)
 
-                # contract_check 요약을 metrics(=반환 metrics)에 첨부해 Phase 4/게이트가
-                # 후속 판정에 활용할 수 있게 한다. 원본 result.json 파일은 건드리지 않는다.
-                metrics_out = {**metrics, "contract_check": contract}
+                    # contract_check 요약을 metrics(=반환 metrics)에 첨부해 Phase 4/게이트가
+                    # 후속 판정에 활용할 수 있게 한다. 원본 result.json 파일은 건드리지 않는다.
+                    metrics_out = {**metrics, "contract_check": contract}
 
-                artifact_paths = _collect_artifacts(workspace_root)
-                emit(
-                    "AGENT_MESSAGE",
-                    f"[Phase 3] Experiment succeeded. Metrics: {_fmt_metrics(metrics)}",
-                    {"success": True, "metrics": metrics, "attempt": attempt,
-                     "contract_violations": [v["type"] for v in contract["violations"]]},
-                )
-                return ExecutorResult(
-                    success=True,
-                    return_code=0,
-                    metrics=metrics_out,
-                    artifact_paths=artifact_paths,
-                    stdout_tail=run_result["stdout_tail"],
-                    stderr_tail=run_result["stderr_tail"],
-                    result_json_path=run_result.get("result_json_path", ""),
-                    environment=repro_env,
-                )
+                    artifact_paths = _collect_artifacts(workspace_root)
+                    emit(
+                        "AGENT_MESSAGE",
+                        f"[Phase 3] Experiment succeeded. Metrics: {_fmt_metrics(metrics)}",
+                        {"success": True, "metrics": metrics, "attempt": attempt,
+                         "contract_violations": [v["type"] for v in contract["violations"]]},
+                    )
+                    return ExecutorResult(
+                        success=True,
+                        return_code=0,
+                        metrics=metrics_out,
+                        artifact_paths=artifact_paths,
+                        stdout_tail=run_result["stdout_tail"],
+                        stderr_tail=run_result["stderr_tail"],
+                        result_json_path=run_result.get("result_json_path", ""),
+                        environment=repro_env,
+                    )
 
         # ── Failure path (rc != 0 또는 L2 실패) ─────────────────────────────
         stderr = run_result["stderr_tail"]
+
+        # 데이터 다운로드/네트워크 실패 → 코드 수정으로 못 고침 → 수동 배치 안내(DATA_NEEDED).
+        # (analyze/repair 낭비를 막기 위해 repair 루프보다 먼저 처리. L4 degenerate보다도 앞단 rc≠0에서 걸림.)
+        if run_result["return_code"] != 0 and _is_data_download_failure(stderr):
+            dataset_hint = _guess_dataset_name(plan)
+            expected_dir = (
+                str(data_path) if data_path
+                else (DATA_CACHE_DIR or str(Path.home() / ".cache" / "mars_datasets"))
+            )
+            from orchestration.approval_registry import GuidanceGate
+            gate = GuidanceGate(file_path="data_needed", error_msg=stderr, attempt_count=attempt)
+            guidance_registry.register(run_id, "data_needed", gate)
+            emit(
+                "DATA_NEEDED",
+                f"[Phase 3] 데이터 다운로드 실패(네트워크). '{dataset_hint}'을(를) 직접 받아 "
+                f"'{expected_dir}' 에 넣은 뒤 그 폴더 경로를 회신하세요.",
+                {
+                    "run_id": run_id,
+                    "dataset": dataset_hint,
+                    "expected_dir": expected_dir,
+                    "error_tail": stderr[-500:],
+                    "options": ["continue", "skip"],
+                },
+            )
+            resolved = gate.wait(timeout=USER_GUIDANCE_TIMEOUT_SECS)
+            guidance_registry.remove(run_id, "data_needed")
+            if not resolved or gate.should_skip:
+                emit(
+                    "AGENT_MESSAGE",
+                    "[Phase 3] 데이터 미제공(skip/timeout) — 정직한 실패로 종료.",
+                    {"skipped": True, "data_needed": True},
+                )
+                return ExecutorResult(
+                    success=False, return_code=run_result["return_code"], stderr_tail=stderr,
+                )
+            new_path = (gate.hint or "").strip()
+            if new_path:
+                data_path = new_path
+                emit(
+                    "AGENT_MESSAGE",
+                    f"[Phase 3] 사용자 제공 데이터 경로로 재실행: {data_path}",
+                    {"data_path": data_path},
+                )
+            attempt = 0
+            continue
+
         emit(
             "AGENT_MESSAGE",
             f"[Phase 3] Experiment failed (rc={run_result['return_code']}). "

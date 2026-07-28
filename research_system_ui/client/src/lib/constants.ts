@@ -80,6 +80,7 @@ export const EVENT_TYPE_CONFIG: Record<EventType, { label: string; icon: string 
   PLAN_AWAITING_APPROVAL: { label: '계획 승인 대기', icon: 'Clock' },
   USER_GUIDANCE_NEEDED: { label: '사용자 가이던스 필요', icon: 'AlertCircle' },
   USER_GUIDANCE_RECEIVED: { label: '가이던스 수신', icon: 'CheckCircle' },
+  DATA_NEEDED: { label: '데이터 필요 (수동 배치)', icon: 'Database' },
   SECTION_DRAFT_DONE: { label: '섹션 초안 완료', icon: 'FileText' },
   PREFLIGHT_QUESTION: { label: '실행 전 확인', icon: 'HelpCircle' },
   PREFLIGHT_ANSWERED: { label: '확인 완료', icon: 'CheckCircle' },
