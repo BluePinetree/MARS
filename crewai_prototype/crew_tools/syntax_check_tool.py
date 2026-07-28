@@ -234,6 +234,180 @@ def check_dataclass_fields(entry_path: str | Path, workspace_root: str | Path) -
     return CheckResult(passed=True)
 
 
+# ── Cross-module 심볼·시그니처 게이트 (안정화: 시그니처 게이트) ──────────────────
+# heavy-lib import로 check_import가 스킵되는 파일에서도, 워크스페이스 "내부" 함수의
+#   (1) 미정의 심볼 import  (예: `from models import gbdt_impurity_importance` 미정의)
+#   (2) 호출 arity 불일치    (예: `linear_coefficient_importance()` 필수 인자 0)
+# 을 AST로 잡아 Phase 3 런타임 실패(→repair 루프)를 Phase 2에서 조기 차단한다.
+# 오탐 방지 원칙(A1과 동일): 동명 다중정의·데코레이터·동적 인자(*args/**kwargs 스프레드)·
+# 와일드카드 import 모듈은 보수적으로 제외한다. 이름 집합은 과수집(전체 트리)해 미정의 오탐을 막는다.
+
+class _FuncSig:
+    __slots__ = ("pos_names", "required", "max_pos", "has_vararg",
+                 "has_kwarg", "kwonly_required", "decorated")
+
+    def __init__(self, node: "ast.FunctionDef | ast.AsyncFunctionDef") -> None:
+        a = node.args
+        pos = list(getattr(a, "posonlyargs", [])) + list(a.args)
+        self.pos_names = [p.arg for p in pos]
+        self.required = len(pos) - len(a.defaults)
+        self.has_vararg = a.vararg is not None
+        self.has_kwarg = a.kwarg is not None
+        self.max_pos = None if self.has_vararg else len(pos)
+        self.kwonly_required = {
+            ka.arg for ka, d in zip(a.kwonlyargs, a.kw_defaults) if d is None
+        }
+        self.decorated = bool(node.decorator_list)
+
+
+def _assign_names(target) -> "list[str]":
+    out: list[str] = []
+    if isinstance(target, ast.Name):
+        out.append(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for e in target.elts:
+            out.extend(_assign_names(e))
+    return out
+
+
+def _collect_module_table(workspace: Path) -> dict:
+    """워크스페이스 각 모듈(stem)의 top-level 함수 시그니처와 (과수집한) 이름 집합을 수집."""
+    modules: dict[str, dict] = {}
+    for py_file in workspace.rglob("*.py"):
+        if "__pycache__" in py_file.parts:
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        entry = modules.setdefault(
+            py_file.stem, {"names": set(), "funcs": {}, "wildcard": False}
+        )
+        # 함수 시그니처: 모듈 top-level만 (메서드/중첩 제외)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                entry["funcs"].setdefault(node.name, []).append(_FuncSig(node))
+        # 이름 집합: 전체 트리에서 과수집(미정의 오탐 방지 — 조건부/중첩 정의도 포함)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                entry["names"].add(node.name)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    entry["names"].update(_assign_names(t))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                entry["names"].add(node.target.id)
+            elif isinstance(node, ast.ImportFrom):
+                if any(al.name == "*" for al in node.names):
+                    entry["wildcard"] = True
+                for al in node.names:
+                    if al.name != "*":
+                        entry["names"].add(al.asname or al.name)
+            elif isinstance(node, ast.Import):
+                for al in node.names:
+                    entry["names"].add((al.asname or al.name).split(".")[0])
+    return modules
+
+
+def _resolve_callee_sig(func_node, imported, module_aliases, modules) -> "Optional[_FuncSig]":
+    """호출 callee를 워크스페이스 함수 단일 정의로 해소(불가/모호 시 None)."""
+    stem = orig = None
+    if isinstance(func_node, ast.Name):
+        if func_node.id in imported:
+            stem, orig = imported[func_node.id]
+    elif isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name):
+        if func_node.value.id in module_aliases:
+            stem, orig = module_aliases[func_node.value.id], func_node.attr
+    if stem is None or stem not in modules:
+        return None
+    sigs = modules[stem]["funcs"].get(orig)
+    if not sigs or len(sigs) != 1:  # 미정의(함수 아님) 또는 동명 다중정의 → 보수적 제외
+        return None
+    return sigs[0]
+
+
+def _check_call_arity(call: ast.Call, sig: "_FuncSig", has_dstar: bool) -> "Optional[str]":
+    npos = len(call.args)
+    kwnames = {kw.arg for kw in call.keywords if kw.arg}
+    if sig.max_pos is not None and npos > sig.max_pos:
+        return (f"too many positional arguments — call passes {npos}, "
+                f"function accepts at most {sig.max_pos}")
+    if npos < sig.required and not has_dstar:
+        missing = [n for n in sig.pos_names[npos:sig.required] if n not in kwnames]
+        if missing:
+            return (f"missing required argument(s) {missing} "
+                    f"(call passes {npos} positional, needs {sig.required})")
+    if sig.kwonly_required and not has_dstar:
+        miss_kw = sorted(sig.kwonly_required - kwnames)
+        if miss_kw:
+            return f"missing required keyword-only argument(s) {miss_kw}"
+    return None
+
+
+def check_cross_module_calls(entry_path: str | Path, workspace_root: str | Path) -> CheckResult:
+    """워크스페이스 내부 함수의 미정의 import·호출 arity 불일치를 AST로 검증."""
+    workspace = Path(workspace_root)
+    modules = _collect_module_table(workspace)
+    if not modules:
+        return CheckResult(passed=True)
+    local_stems = set(modules.keys())
+
+    src_dir = workspace / "src"
+    caller_root = src_dir if src_dir.is_dir() else workspace
+    for py_file in caller_root.rglob("*.py"):
+        if "__pycache__" in py_file.parts:
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        imported: dict[str, tuple] = {}      # local_name -> (mod_stem, orig_name)
+        module_aliases: dict[str, str] = {}  # alias -> mod_stem
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                mod_stem = node.module.split(".")[-1]
+                if mod_stem not in local_stems:
+                    continue
+                mod = modules[mod_stem]
+                for al in node.names:
+                    if al.name == "*":
+                        continue
+                    # (1) 미정의 심볼 import — 와일드카드 재수출 모듈은 제외(오탐 방지)
+                    if not mod["wildcard"] and al.name not in mod["names"]:
+                        return CheckResult(
+                            passed=False,
+                            error=(f"ImportError: cannot import name '{al.name}' "
+                                   f"from '{node.module}' (in {py_file.name}). "
+                                   f"Defined: {sorted(mod['names'])[:25]}"),
+                            error_type="import",
+                            line_no=getattr(node, "lineno", None),
+                        )
+                    imported[al.asname or al.name] = (mod_stem, al.name)
+            elif isinstance(node, ast.Import):
+                for al in node.names:
+                    top = al.name.split(".")[0]
+                    if top in local_stems:
+                        module_aliases[al.asname or top] = top
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if any(isinstance(a, ast.Starred) for a in node.args):
+                continue  # f(*args) → 정적 카운트 불가
+            has_dstar = any(kw.arg is None for kw in node.keywords)
+            sig = _resolve_callee_sig(node.func, imported, module_aliases, modules)
+            if sig is None or sig.decorated:
+                continue
+            err = _check_call_arity(node, sig, has_dstar)
+            if err:
+                return CheckResult(
+                    passed=False,
+                    error=f"TypeError: {err} (in {py_file.name})",
+                    error_type="runtime",
+                    line_no=getattr(node, "lineno", None),
+                )
+    return CheckResult(passed=True)
+
+
 def check_import(file_path: str | Path, workspace_root: str | Path) -> CheckResult:
     """Run the file in a subprocess with import-only mode to detect import errors.
 

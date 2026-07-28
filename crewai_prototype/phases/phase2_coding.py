@@ -36,7 +36,12 @@ from core.handoff_models import (
     StageCodingResult,
 )
 from core.llm_factory import create_llm_for_agent
-from crew_tools.syntax_check_tool import check_dataclass_fields, check_import, check_syntax
+from crew_tools.syntax_check_tool import (
+    check_cross_module_calls,
+    check_dataclass_fields,
+    check_import,
+    check_syntax,
+)
 from orchestration.approval_registry import CancellationToken, GuidanceRegistry
 from pipeline_config.constants import (
     MAX_AUTO_REPAIR_ATTEMPTS,
@@ -351,6 +356,12 @@ def _generate_content(
             "- `run_selected_experiments` MUST run the experiment(s) and RETURN a dict that contains a",
             "  `metrics` object of NUMERIC results, e.g. {\"metrics\": {\"accuracy\": 0.83, \"roc_auc\": 0.86}}.",
             "  For model comparisons, include each model's scores under `metrics` (e.g. per-model keys).",
+            "- FORBIDDEN — NO stubs / smoke / placeholder implementations. You MUST fully implement the",
+            "  ACTUAL experiment (real data loading, training, evaluation) for THIS task's domain. Never",
+            "  return a fake success such as {\"metrics\": {\"smoke_metric\": 1.0}} or notes like",
+            "  'not yet implemented' / 'placeholder' / 'to be implemented'. Report REAL domain metrics",
+            "  (accuracy/roc_auc/f1/rmse/mae/r2/top1/top5/smape/...). Downstream validation REJECTS",
+            "  placeholder results as failures — a stub does not pass, it only wastes a repair attempt.",
             "- Do NOT call sys.exit(), do NOT write results/result.json, and do NOT define main() —",
             "  the stable src/main.py parses args and writes results/result.json from your returned dict.",
         ]
@@ -451,7 +462,7 @@ def _repair_content(
 # ── 검사 파이프라인 ────────────────────────────────────────────────────────────
 
 def _run_checks(file_path: str, workspace_root: str) -> CheckResult:
-    """구문 → import → dataclass 필드 검사. 첫 번째 실패 또는 통과를 반환한다."""
+    """구문 → import → dataclass → cross-module 시그니처 검사. 첫 실패 또는 통과 반환."""
     full = Path(workspace_root) / file_path
     syntax = check_syntax(full)
     if not syntax.passed:
@@ -459,7 +470,12 @@ def _run_checks(file_path: str, workspace_root: str) -> CheckResult:
     import_check = check_import(full, workspace_root)
     if not import_check.passed:
         return import_check
-    return check_dataclass_fields(file_path, workspace_root)
+    dc = check_dataclass_fields(file_path, workspace_root)
+    if not dc.passed:
+        return dc
+    # cross-module 심볼·시그니처 게이트(전체 워크스페이스). heavy-lib import로 check_import가
+    # 스킵되는 파일의 함수명 오타·arity 불일치를 잡아 Phase 3 런타임 실패를 조기 차단.
+    return check_cross_module_calls(file_path, workspace_root)
 
 
 def _apply_repair_guarded(
