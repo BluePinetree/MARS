@@ -173,12 +173,15 @@ def _make_repair_agent(llm) -> Agent:
 # ── Direct subprocess execution (faster than via agent) ──────────────────────
 
 def _experiment_cmd(
-    python_exe: str, entry_point: str, workspace_root: str, data_path: Optional[str] = None,
+    python_exe: str, entry_point: str, workspace_root: str,
+    data_path: Optional[str] = None, epochs: Optional[int] = None,
+    batch_size: Optional[int] = None,
 ) -> "list[str]":
     """실험 서브프로세스 실행 명령을 구성한다(스캐폴드 stable main.py CLI 규약).
 
     run_execution_phase가 재현성 기록의 entry_command에도 동일 명령을 쓰도록 공용화한다.
     data_path(사용자 제공 데이터 폴더)가 있으면 스캐폴드 CLI(--data-path/--data-root)로 전달한다.
+    epochs가 있으면 --epochs로 전달한다(미전달 시 scaffold default=1로 조용히 강등되는 버그 수정).
     """
     cmd = [
         python_exe, entry_point,
@@ -189,6 +192,10 @@ def _experiment_cmd(
         "--seed", "42",
         "--device", os.environ.get("MARS_EXPERIMENT_DEVICE", "cpu"),
     ]
+    if epochs and epochs > 0:
+        cmd += ["--epochs", str(int(epochs))]
+    if batch_size and batch_size > 0:
+        cmd += ["--batch-size", str(int(batch_size))]
     if data_path:
         # 프로파일별로 --data_path(tabular/timeseries) 또는 --data_root(base)를 쓰므로 둘 다 전달
         # (scaffold CLI는 parse_known_args라 해당 프로파일이 안 쓰는 인자는 안전히 무시).
@@ -203,6 +210,8 @@ def _run_script(
     emit: Optional[Callable] = None,
     python_exe: Optional[str] = None,
     data_path: Optional[str] = None,
+    epochs: Optional[int] = None,
+    batch_size: Optional[int] = None,
 ) -> dict:
     """Run the experiment script with Popen + streaming stdout.
 
@@ -213,7 +222,10 @@ def _run_script(
     # --output_root 미지정 시 기본값이 nested dir로 새어 phase3가 results/result.json을 못 찾고,
     # --validation_tier 기본값 "smoke"는 degenerate(1.0) 평가를 낳는다. 실제 평가를 위해 명시한다.
     # (scaffold cli는 parse_known_args라 비스캐폴드 entry에서도 안전하게 무시된다)
-    cmd = _experiment_cmd(python_exe or sys.executable, entry_point, str(workspace_root), data_path)
+    cmd = _experiment_cmd(
+        python_exe or sys.executable, entry_point, str(workspace_root),
+        data_path, epochs, batch_size,
+    )
     start = time.monotonic()
     stdout_lines: list[str] = []
 
@@ -628,6 +640,14 @@ def run_execution_phase(
             {"requested_python": python_exe},
         )
         resolved_python = sys.executable
+    # 계획된 학습 예산(epoch)을 실험 CLI로 전달 — 미전달 시 scaffold default=1로 강등되던 버그 수정.
+    planned_epochs = _planned_epochs(plan)
+    if planned_epochs:
+        emit(
+            "AGENT_MESSAGE",
+            f"[Phase 3] 학습 예산: 계획 {planned_epochs} epoch을 실험에 전달(--epochs).",
+            {"planned_epochs": planned_epochs},
+        )
     repro_env: dict = {}
     try:
         from core.env_detect import describe_python, requirements_hash
@@ -638,7 +658,7 @@ def run_execution_phase(
             "device": device,
             "seed": 42,
             "entry_command": " ".join(
-                _experiment_cmd(resolved_python, entry_point, str(workspace_root), data_path)
+                _experiment_cmd(resolved_python, entry_point, str(workspace_root), data_path, planned_epochs)
             ),
             "requirements_hash": requirements_hash(env_desc.get("packages", {})),
         }
@@ -666,6 +686,7 @@ def run_execution_phase(
         run_result = _run_script(
             entry_point, workspace_root, EXPERIMENT_TIMEOUT_SECS,
             emit=emit, python_exe=resolved_python, data_path=data_path,
+            epochs=planned_epochs,
         )
 
         if run_result["return_code"] == 0:

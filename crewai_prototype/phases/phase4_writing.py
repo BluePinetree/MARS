@@ -67,10 +67,13 @@ Write the "{section}" section of the research paper.
 Research context:
   Topic: {topic}
   Problem: {problem}
-  Success criteria: {criteria}
+  Success criteria (GOALS/targets only — NOT necessarily what was executed): {criteria}
 
-Experiment results (use these numbers — do NOT fabricate):
+Experiment results — the ACTUAL run (use ONLY these numbers; do NOT fabricate):
 {exec_summary}
+NOTE: Report the experimental configuration (epochs, batch size, etc.) and ALL metrics
+from these ACTUAL results — NEVER from the success criteria above (those are goals and
+may differ from the real run).
 
 Previously written sections for context:
 {prior_sections}
