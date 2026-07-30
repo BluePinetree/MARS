@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -391,23 +392,35 @@ _STUB_NOTE_MARKERS = (
 _PLACEHOLDER_METRIC_KEYS = {"smoke_metric", "smoke", "dummy", "placeholder", "noop"}
 
 
-def _flatten_metric_keys(inner: dict) -> "list[str]":
-    keys: list[str] = []
+def _flatten_metric_items(inner: dict) -> "list[tuple[str, Any]]":
+    """중첩 metrics를 (dotted-key, leaf-value) 목록으로 평탄화한다."""
+    items: list[tuple[str, Any]] = []
 
     def _rec(d, prefix=""):
         if isinstance(d, dict):
             for k, v in d.items():
                 kk = f"{prefix}{k}"
-                keys.append(kk)
                 if isinstance(v, dict):
                     _rec(v, kk + ".")
+                else:
+                    items.append((kk, v))
 
     _rec(inner)
-    return keys
+    return items
+
+
+def _is_finite_number(v: Any) -> bool:
+    """유효한 유한 수치인지(NaN/inf/None/bool/문자열 제외)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_degenerate_result(rj: dict) -> "tuple[bool, str]":
-    """rc=0·success=true 여도 '실제 실험이 아닌' 결과(스텁/placeholder)인지 판정."""
+    """rc=0·success=true 여도 '실제 실험이 아닌' 결과(스텁/placeholder/NaN)인지 판정."""
     notes = str(rj.get("notes", "")).lower()
     for mk in _STUB_NOTE_MARKERS:
         if mk in notes:
@@ -415,14 +428,20 @@ def _is_degenerate_result(rj: dict) -> "tuple[bool, str]":
     inner = rj.get("metrics", {})
     if not isinstance(inner, dict):
         inner = {}
-    keys = _flatten_metric_keys(inner)
-    lk = [str(k).lower() for k in keys]
-    non_placeholder = [k for k in lk if k.rsplit(".", 1)[-1] not in _PLACEHOLDER_METRIC_KEYS]
-    if lk and not non_placeholder:
+    items = _flatten_metric_items(inner)
+    lk_items = [(str(k).lower(), v) for k, v in items]
+    keys = [k for k, _ in items]
+    non_placeholder = [k for k, _ in lk_items if k.rsplit(".", 1)[-1] not in _PLACEHOLDER_METRIC_KEYS]
+    if lk_items and not non_placeholder:
         return True, f"placeholder 지표만 존재: {keys}"
-    has_domain = any(any(tok in k for tok in _DOMAIN_METRIC_TOKENS) for k in lk)
-    if not has_domain:
+    # 도메인 지표(정확도/rmse/top1/r2 등) 항목 수집
+    domain_items = [(k, v) for k, v in lk_items if any(tok in k for tok in _DOMAIN_METRIC_TOKENS)]
+    if not domain_items:
         return True, f"도메인 지표(정확도/rmse/top1/r2 등)가 하나도 없음: {keys[:8]}"
+    # 도메인 지표 키는 있으나 값이 전부 NaN/None/비수치 → 무의미한 결과(예: top1=NaN)
+    if not any(_is_finite_number(v) for _, v in domain_items):
+        bad = [(k, v) for k, v in domain_items][:5]
+        return True, f"도메인 지표 값이 전부 유효 수치 아님(NaN/None): {bad}"
     return False, ""
 
 
