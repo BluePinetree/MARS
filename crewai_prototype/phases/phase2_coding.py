@@ -327,6 +327,72 @@ def _build_dep_context(imports_from: list[str], workspace_root: str) -> str:
 
 # ── 직접 LLM 호출 ──────────────────────────────────────────────────────────────
 
+# ── 설치 라이브러리 버전 인지 (버전 드리프트 방지) ──────────────────────────────
+# coder의 라이브러리 지식이 설치 버전과 어긋나 removed/deprecated API를 쓰는 실패
+# (예: sklearn 1.6+에서 mean_squared_error(squared=False) 제거)를 예방한다.
+_VERSION_RULES_CACHE = None
+
+
+def _installed_versions() -> dict:
+    pkgs = ["scikit-learn", "numpy", "pandas", "scipy", "torch", "torchvision",
+            "timm", "xgboost", "lightgbm", "statsmodels", "transformers"]
+    out: dict = {}
+    try:
+        from importlib.metadata import version
+    except Exception:
+        return out
+    for p in pkgs:
+        try:
+            out[p] = version(p)
+        except Exception:
+            pass
+    return out
+
+
+def _version_rules_block() -> str:
+    """설치된 핵심 라이브러리 버전 + 버전별 API 규칙을 프롬프트 블록으로(1회 캐시)."""
+    global _VERSION_RULES_CACHE
+    if _VERSION_RULES_CACHE is not None:
+        return _VERSION_RULES_CACHE
+    vers = _installed_versions()
+
+    def _ge(pkg: str, major: int, minor: int = 0) -> bool:
+        v = vers.get(pkg)
+        if not v:
+            return False
+        try:
+            nums = [int(x) for x in v.split("+")[0].split(".")[:2]]
+            got = (nums[0], nums[1] if len(nums) > 1 else 0)
+            return got >= (major, minor)
+        except Exception:
+            return False
+
+    lines = [
+        "INSTALLED LIBRARY VERSIONS — generate code that runs on THESE EXACT versions "
+        "(do NOT use removed/deprecated APIs or parameters):",
+    ]
+    if vers:
+        lines.append("  " + ", ".join(f"{k}={v}" for k, v in vers.items()))
+    rules: list[str] = []
+    if _ge("scikit-learn", 1, 6):
+        rules.append(
+            "- scikit-learn >= 1.6: mean_squared_error() has NO 'squared' parameter (removed). "
+            "For RMSE use `from sklearn.metrics import root_mean_squared_error` or "
+            "`np.sqrt(mean_squared_error(y_true, y_pred))`. NEVER pass squared=False."
+        )
+    if _ge("numpy", 2, 0):
+        rules.append(
+            "- numpy >= 2.0: np.float_ / np.int_ / np.NaN / np.bool8 / np.string_ are removed. "
+            "Use np.float64 / np.int64 / np.nan / np.bool_ / np.bytes_. "
+            "np.product→np.prod, np.trapz→np.trapezoid."
+        )
+    if not rules:
+        rules.append("- Match the installed versions' current API; avoid deprecated/removed parameters.")
+    lines += rules
+    _VERSION_RULES_CACHE = "\n".join(lines)
+    return _VERSION_RULES_CACHE
+
+
 def _generate_content(
     file_spec: FileNodeSpec,
     workspace_root: str,
@@ -383,6 +449,8 @@ def _generate_content(
         "- For any dataset download (CIFAR-10, ImageNet, etc.), use",
         "  `os.environ.get('DATA_DIR', './data')` as the root/cache directory.",
         "  This directory is persistent across runs — only download if files are missing.",
+        "",
+        _version_rules_block(),
         "",
         "Output ONLY valid Python source code.",
         "Do NOT include markdown fences, prose, or explanations.",
@@ -448,6 +516,7 @@ def _repair_content(
     ]
     if extra_rule:
         parts += ["", extra_rule]
+    parts += ["", _version_rules_block()]
     parts += [
         "",
         "Output ONLY the corrected Python source. No markdown fences. No explanation.",
