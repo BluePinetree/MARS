@@ -602,6 +602,7 @@ def run_execution_phase(
     cancel: Optional[CancellationToken] = None,
     python_exe: Optional[str] = None,
     data_path: Optional[str] = None,
+    epochs_override: Optional[int] = None,
 ) -> ExecutorResult:
     """Run the experiment and collect results. Escalates to user on persistent failure.
 
@@ -641,7 +642,8 @@ def run_execution_phase(
         )
         resolved_python = sys.executable
     # 계획된 학습 예산(epoch)을 실험 CLI로 전달 — 미전달 시 scaffold default=1로 강등되던 버그 수정.
-    planned_epochs = _planned_epochs(plan)
+    # epochs_override가 있으면(P1 개선 루프가 예산을 증대) 그 값을 우선 사용.
+    planned_epochs = epochs_override if epochs_override else _planned_epochs(plan)
     if planned_epochs:
         emit(
             "AGENT_MESSAGE",

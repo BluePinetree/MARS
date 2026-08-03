@@ -399,15 +399,71 @@ class PipelineOrchestrator:
                 except Exception:
                     run_env_python = None
                     run_data_path = None
-                exec_result = run_execution_phase(
-                    plan=plan_bundle,
-                    coding_result=coding_result,
-                    guidance_registry=self.guidance_registry,
-                    emit=emit,
-                    cancel=cancel,
-                    python_exe=run_env_python,
-                    data_path=run_data_path,
-                )
+                # ── P1: 성능 추구 개선 루프 (완주→성능추구) ─────────────────────
+                # 정량 목표(success_criteria)가 있으면 달성 시 조기 종료, 없으면 성능이
+                # 정체될 때까지 학습 예산(epoch)을 증대하며 재실행하고 best-so-far를 넘긴다.
+                # (에폭 레버가 없는 tabular 등은 단일 실행.)
+                from orchestration.target_gate import parse_targets, primary_metric, evaluate, is_better
+                from phases.phase3_execution import _planned_epochs
+                targets = parse_targets(plan_bundle.planner.success_criteria)
+                base_epochs = _planned_epochs(plan_bundle)
+                try:
+                    max_iters = max(1, min(int(_md.get("max_experiments") or 3), 5))
+                except Exception:
+                    max_iters = 3
+                EPOCH_CAP, PLATEAU_EPS = 30, 0.02
+                best_exec, best_val, prev_val, cur_epochs = None, None, None, base_epochs
+                for _it in range(max_iters):
+                    exec_result = run_execution_phase(
+                        plan=plan_bundle,
+                        coding_result=coding_result,
+                        guidance_registry=self.guidance_registry,
+                        emit=emit,
+                        cancel=cancel,
+                        python_exe=run_env_python,
+                        data_path=run_data_path,
+                        epochs_override=cur_epochs,
+                    )
+                    if cancel.is_cancelled or not exec_result.success:
+                        best_exec = best_exec or exec_result
+                        break
+                    pm = primary_metric(exec_result.metrics)
+                    gate = evaluate(exec_result.metrics, targets)
+                    if pm is not None:
+                        _name, _val, _higher = pm
+                        if is_better(_val, best_val, _higher):
+                            best_exec, best_val = exec_result, _val
+                        emit(
+                            "AGENT_MESSAGE",
+                            f"[Phase 3] 개선 루프 {_it + 1}/{max_iters}: {_name}={_val:.4f} "
+                            f"({gate['status']}), best={best_val:.4f}, epochs={cur_epochs}",
+                            {"iter": _it + 1, "primary": _name, "value": _val,
+                             "gate": gate["status"], "epochs": cur_epochs},
+                        )
+                    else:
+                        best_exec = best_exec or exec_result
+                    if gate["status"] == "met":
+                        emit("AGENT_MESSAGE",
+                             f"[Phase 3] 성능 목표 달성 — 조기 종료. {gate['detail']}",
+                             {"target_met": True})
+                        break
+                    if not base_epochs or _it >= max_iters - 1:
+                        break  # 에폭 레버 없음(tabular) 또는 예산 소진
+                    if pm is not None and prev_val is not None:
+                        rel = abs(_val - prev_val) / (abs(prev_val) + 1e-9)
+                        if rel < PLATEAU_EPS:
+                            emit("AGENT_MESSAGE",
+                                 f"[Phase 3] 성능 정체(직전 대비 {rel * 100:.1f}% 개선) — 예산 증대 중단",
+                                 {"plateau": True})
+                            break
+                    if pm is not None:
+                        prev_val = _val
+                    cur_epochs = min((cur_epochs or 1) * 3, EPOCH_CAP)
+                    emit("AGENT_MESSAGE",
+                         f"[Phase 3] 추가 개선 여지 → 학습 예산 {cur_epochs} epoch로 재실행",
+                         {"next_epochs": cur_epochs})
+                exec_result = best_exec or exec_result
+
                 # 실패 시 패턴 감지 (escalation 판단은 run_execution_phase 내부에서 이미 처리)
                 if not exec_result.success:
                     kind = failure_detector.record(exec_result.stderr_tail, exec_result.return_code)
