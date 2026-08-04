@@ -51,13 +51,23 @@ EVENT_TYPES = (
     "exec_stdout",
     "failure_escalation",
     "extension_proposals",
+    # Execution-contract events (Campaign A). 미등록 시 normalize_event_type이
+    # AGENT_MESSAGE로 강등해 감사 로그에서 타입별 질의가 불가능해진다.
+    "EXECUTION_SCALE",
+    "EXECUTION_SCALE_DOWNGRADE",
+    "CONTRACT_VIOLATION",
+    "CONTRACT_METRICS_MISSING",
+    "REPAIR_REJECTED_API_SHRINK",
 )
 
 # Fast O(1) lookup set including uppercase aliases for all entries
 _EVENT_TYPE_SET: frozenset[str] = frozenset(EVENT_TYPES)
 _EVENT_TYPE_UPPER_MAP: dict[str, str] = {e.upper(): e for e in EVENT_TYPES}
 
-TERMINAL_SESSION_STATUSES = ("completed", "failed")
+# "interrupted"는 서버 재시작 시 고아 세션에 부여되는 확정 종료 상태
+# (entrypoints/init.py `_cleanup_stale_sessions`). 누락 시 StateCalculator가
+# 이를 종료로 인식하지 못해 24건의 legacy 세션이 미종결로 남았다.
+TERMINAL_SESSION_STATUSES = ("completed", "failed", "interrupted")
 
 
 def normalize_event_type(raw_event_type: Any) -> str:

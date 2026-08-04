@@ -212,6 +212,7 @@ def _run_script(
     data_path: Optional[str] = None,
     epochs: Optional[int] = None,
     batch_size: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Run the experiment script with Popen + streaming stdout.
 
@@ -243,6 +244,12 @@ def _run_script(
             data_dir = DATA_CACHE_DIR or str(Path.home() / ".cache" / "mars_datasets")
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         env["DATA_DIR"] = data_dir
+
+        # 실제 run_id를 실험 프로세스에 전달. 미전달 시 스캐폴드가 `--output-root`의
+        # 마지막 경로 조각(= "workspace")을 run_id로 기록해 result.json이 events.jsonl과
+        # 조인 불가능해진다(legacy 65/70건이 `run_id: "workspace"`).
+        if run_id:
+            env["RESEARCH_RUN_ID"] = str(run_id)
 
         proc = subprocess.Popen(
             cmd,
@@ -342,31 +349,76 @@ _EXPECTED_METRIC_KEYS = (
 _EPOCH_TEXT_RE = re.compile(r"(\d+)\s*(?:training\s*)?epochs?\b", re.IGNORECASE)
 
 
+def _coerce_num(v: Any) -> Optional[float]:
+    """bool을 numeric으로 오인하지 않고 float로 강제."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+
 def _find_numeric(metrics: dict, keys) -> Optional[float]:
     """metrics(및 중첩 dict)에서 key 후보에 해당하는 numeric 값을 방어적으로 탐색."""
-    def _coerce(v: Any) -> Optional[float]:
-        if isinstance(v, bool):
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        return None
-
     # 최상위 우선
     for k in keys:
         if k in metrics:
-            c = _coerce(metrics[k])
+            c = _coerce_num(metrics[k])
             if c is not None:
                 return c
-    # 흔한 중첩 컨테이너 (metrics/summary/final 등) 안도 한 단계 탐색
-    for container_key in ("metrics", "summary", "final", "final_metrics", "eval", "results"):
+    # 흔한 중첩 컨테이너 안도 한 단계 탐색.
+    # "artifacts"는 스캐폴드 계약이 실행 메타데이터(epochs 등)를 넣는 위치이므로 필수.
+    for container_key in ("metrics", "summary", "final", "final_metrics", "eval", "results", "artifacts"):
         sub = metrics.get(container_key)
         if isinstance(sub, dict):
             for k in keys:
                 if k in sub:
-                    c = _coerce(sub[k])
+                    c = _coerce_num(sub[k])
                     if c is not None:
                         return c
     return None
+
+
+def _collect_numeric(obj: Any, keys, max_depth: int = 5) -> list[float]:
+    """중첩 구조 전체를 깊이 제한 하에 순회해 key 후보의 numeric 값을 **모두** 수집.
+
+    `_find_numeric`은 2단계까지만 보기 때문에 `artifacts.experiments.<model>.epochs`
+    처럼 모델별로 흩어진 값을 찾지 못했다(실측: 9 epoch를 실제 실행한 run에서도
+    `actual_epochs=null`이 되어 EXECUTION_SCALE_DOWNGRADE가 발동 불가능했음).
+    """
+    found: list[float] = []
+
+    def _walk(node: Any, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in keys:
+                    c = _coerce_num(v)
+                    if c is not None:
+                        found.append(c)
+                        continue
+                _walk(v, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                _walk(item, depth + 1)
+
+    _walk(obj, 0)
+    return found
+
+
+def _key_matches(key: str, candidates) -> bool:
+    """`resnet18__test_top1` 처럼 접두사가 붙은 키도 metric 후보로 인정.
+
+    정확 일치만 보던 기존 로직은 모델명 접두사가 붙는 실제 키에서 항상 실패했다
+    (실측: `expected_metric_found`가 모든 run에서 false).
+    """
+    k = str(key).strip().lower()
+    for cand in candidates:
+        c = str(cand).lower()
+        if k == c or k.endswith("_" + c) or k.endswith("__" + c) or ("_" + c + "_") in k:
+            return True
+    return False
 
 
 def _has_numeric_metric(metrics: dict) -> bool:
@@ -494,8 +546,24 @@ def check_contract(plan: PlanBundle, metrics: dict) -> dict:
     metrics = metrics if isinstance(metrics, dict) else {}
     planned_epochs = _planned_epochs(plan)
     actual_epochs = _find_numeric(metrics, _EPOCH_KEYS)
+    if actual_epochs is None:
+        # 얕은 탐색 실패 시 전체 순회로 폴백. 모델별로 값이 흩어져 있으면 **최소값**을
+        # 취한다 — 하나라도 계획보다 적게 돌았으면 강등으로 표면화해야 하므로.
+        _epochs_all = _collect_numeric(metrics, _EPOCH_KEYS)
+        actual_epochs = min(_epochs_all) if _epochs_all else None
     has_numeric = _has_numeric_metric(metrics)
     expected_metric = _find_numeric(metrics, _EXPECTED_METRIC_KEYS)
+    if expected_metric is None:
+        # 모델명 접두사가 붙은 키(`resnet18__test_top1`)를 인정하는 완화 매칭으로 폴백.
+        expected_metric = next(
+            (
+                c
+                for container in (metrics, metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {})
+                for k, v in (container or {}).items()
+                if _key_matches(k, _EXPECTED_METRIC_KEYS) and (c := _coerce_num(v)) is not None
+            ),
+            None,
+        )
 
     violations: list[dict] = []
 
@@ -603,6 +671,7 @@ def run_execution_phase(
     python_exe: Optional[str] = None,
     data_path: Optional[str] = None,
     epochs_override: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> ExecutorResult:
     """Run the experiment and collect results. Escalates to user on persistent failure.
 
@@ -688,7 +757,7 @@ def run_execution_phase(
         run_result = _run_script(
             entry_point, workspace_root, EXPERIMENT_TIMEOUT_SECS,
             emit=emit, python_exe=resolved_python, data_path=data_path,
-            epochs=planned_epochs,
+            epochs=planned_epochs, run_id=run_id,
         )
 
         if run_result["return_code"] == 0:

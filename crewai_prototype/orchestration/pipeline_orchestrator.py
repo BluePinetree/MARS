@@ -423,6 +423,7 @@ class PipelineOrchestrator:
                         python_exe=run_env_python,
                         data_path=run_data_path,
                         epochs_override=cur_epochs,
+                        run_id=run_id,
                     )
                     if cancel.is_cancelled or not exec_result.success:
                         best_exec = best_exec or exec_result

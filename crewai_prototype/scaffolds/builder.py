@@ -682,7 +682,10 @@ import experiment_impl
 def _build_runtime_context(args) -> RuntimeContext:
     output_root = Path(args.output_root).resolve()
     return RuntimeContext(
-        run_id=output_root.name if output_root.name else output_root.parent.name,
+        run_id=(
+            os.environ.get("RESEARCH_RUN_ID")
+            or (output_root.name if output_root.name else output_root.parent.name)
+        ),
         output_root=output_root,
         results_root=output_root / "results",
         reports_root=output_root / "reports",
