@@ -1,0 +1,20 @@
+{
+  "per_config": {
+    "resnet18/recipe_bs128_nw8_det": 9.82,
+    "mobilenet_v2/recipe_bs128_nw8_det": 13.94,
+    "resnet18/recipe_bs128_nw8_det_amp": 8.4,
+    "mobilenet_v2/recipe_bs128_nw8_det_amp": 16.41
+  },
+  "projections": {
+    "recipe_bs128_nw8_det": {
+      "pair_s_per_ep": 23.76,
+      "h_200ep_pair": 1.32,
+      "h_9rollouts": 11.88
+    },
+    "recipe_bs128_nw8_det_amp": {
+      "pair_s_per_ep": 24.81,
+      "h_200ep_pair": 1.38,
+      "h_9rollouts": 12.4
+    }
+  }
+}

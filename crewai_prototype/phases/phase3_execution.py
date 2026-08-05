@@ -102,6 +102,18 @@ User hint: {hint}
 Stage 1 API definitions (authoritative — these are the ONLY valid signatures):
 {stage1_api}
 
+MANDATORY RULES — a repair that breaks any of these is rejected:
+- NEVER use relative imports (e.g. `from . import X`, `from .mod import Y`).
+  Use absolute imports only (`import metrics`, `from metrics import f`). The entry point runs as
+  `python src/main.py` with no package context, so a relative import raises at import time and
+  produces no result.json at all.
+- NEVER replace real work with a stub, smoke placeholder, or no-op. Do not return hardcoded
+  metrics, do not return `{{"smoke_metric": 1.0}}`, do not add notes like "not yet implemented".
+  Report REAL domain metrics computed from the actual data.
+- NEVER delete or empty an existing public function, class, or method to make an error disappear.
+  Fix the cause, keep the API surface.
+{stack_rules}{version_rules}
+
 For each file in the repair list:
 1. Call WorkspaceReadTool to read its current content.
 2. Apply the fix instructions. When fixing TypeError on class instantiation,
@@ -110,6 +122,81 @@ For each file in the repair list:
 4. Call SyntaxCheckTool to verify the file compiles.
 5. Fix any syntax errors before moving to the next file.
 Output: DONE"""
+
+
+_RELATIVE_IMPORT_RE = re.compile(r"^\s*from\s+\.", re.MULTILINE)
+
+
+def _post_repair_gate(repair_files, workspace_root: str, emit: EmitFn) -> None:
+    """수리된 파일을 실행 전에 정적 검사하고, 상대 import는 즉시 되돌린다.
+
+    Phase 2의 `_run_checks`(구문→import→dataclass→cross-module)를 재사용한다.
+    상대 import는 문법상 합법이라 어떤 구문 검사도 잡지 못하므로 별도 정규식으로 검출하고,
+    발견 시 절대 import로 기계적으로 치환한다(LLM 재호출 없이 결정론적으로 복구).
+    실패는 이벤트로만 표면화하고 실행 흐름은 막지 않는다 — 다음 attempt의 analyzer가
+    진단할 수 있도록 정보를 남기는 것이 목적이다.
+    """
+    try:
+        from phases.phase2_coding import _run_checks
+    except Exception:
+        return
+    for rel in list(repair_files or []):
+        full = Path(workspace_root) / rel
+        if not full.is_file():
+            continue
+        # (1) 상대 import 기계적 복구
+        try:
+            src = full.read_text(encoding="utf-8")
+            if _RELATIVE_IMPORT_RE.search(src):
+                fixed = re.sub(r"^(\s*)from\s+\.\s*import\s+", r"\1import ", src, flags=re.MULTILINE)
+                fixed = re.sub(r"^(\s*)from\s+\.(\w)", r"\1from \2", fixed, flags=re.MULTILINE)
+                if fixed != src:
+                    full.write_text(fixed, encoding="utf-8")
+                    emit(
+                        "REPAIR_REJECTED_API_SHRINK",
+                        f"[Phase 3] 수리가 주입한 상대 import를 절대 import로 복구: {rel}",
+                        {"file": rel, "reason": "relative_import_injected_by_repair"},
+                    )
+        except Exception:
+            pass
+        # (2) Phase 2와 동일한 4단 정적 검사
+        try:
+            res = _run_checks(rel, workspace_root)
+            if not getattr(res, "passed", True):
+                emit(
+                    "FILE_IMPORT_ERROR",
+                    f"[Phase 3] 수리 후 정적 검사 실패: {rel} — {getattr(res, 'error', '')[:300]}",
+                    {"file": rel, "error_type": getattr(res, "error_type", ""),
+                     "stage": "post_repair_gate"},
+                )
+        except Exception:
+            pass
+
+
+def _repair_stack_rules(plan) -> str:
+    """Phase 2의 도메인 스택 규칙을 Phase 3 수리 프롬프트에도 주입.
+
+    Phase 3 수리는 지금까지 Phase 2가 쌓은 계약(import 규칙·스텁 금지·스택 규칙·버전 규칙)을
+    전부 우회했다. 실측 결과 그 결과로 수리 에이전트가 상대 import를 주입해 import 시점에
+    죽거나(S7 시계열 `cb5bf2`), 스택 규칙 밖 라이브러리로 갈아치우는 일이 발생했다.
+    """
+    try:
+        from phases.phase2_coding import _STACK_RULES
+        profile = getattr(getattr(plan, "planner", None), "recommended_profile", None) or "generic_script"
+        rule = _STACK_RULES.get(profile, _STACK_RULES.get("generic_script", ""))
+        return f"\n- Stack rule for this domain ({profile}): {rule}" if rule else ""
+    except Exception:
+        return ""
+
+
+def _repair_version_rules() -> str:
+    """설치된 라이브러리 버전에 맞는 API 규칙을 수리 프롬프트에 주입 (Phase 2와 동일)."""
+    try:
+        from phases.phase2_coding import _version_rules_block
+        block = (_version_rules_block() or "").strip()
+        return f"\n{block}" if block else ""
+    except Exception:
+        return ""
 
 
 # ── Agent builders ────────────────────────────────────────────────────────────
@@ -963,12 +1050,20 @@ def run_execution_phase(
                     fix_instructions=fi_text,
                     hint=hint or "(none)",
                     stage1_api=stage1_api,
+                    stack_rules=_repair_stack_rules(plan),
+                    version_rules=_repair_version_rules(),
                 ),
                 expected_output="DONE",
                 agent=_make_repair_agent(repair_llm),
             )
             Crew(agents=[repair_task.agent], tasks=[repair_task], verbose=False).kickoff()
             hint = ""
+            # 수리 결과를 실행 전에 정적 검사한다. Phase 3는 지금까지 수리 후 곧바로
+            # 스크립트를 돌려서, 상대 import(문법상 합법이라 SyntaxCheckTool을 통과)나
+            # cross-module 시그니처 회귀가 실행 시점에야 드러났다. 실측: S7 `cb5bf2`가
+            # 수리로 주입된 `from . import metrics`로 import 시점에 죽고 result.json도
+            # 남기지 못했다 — analyzer가 다음 라운드에서 진단할 근거조차 없었다.
+            _post_repair_gate(repair_files, workspace_root, emit)
 
 
 def _parse_analysis(raw: str) -> dict:

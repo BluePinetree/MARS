@@ -1,0 +1,109 @@
+{
+  "env": {
+    "python": "3.10.19",
+    "torch": "2.5.0+cu118",
+    "torchvision": "0.20.0+cu118",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "note": "1 warmup epoch + 1 measured epoch per config. Both models CIFAR-stem-adapted.",
+  "configs": {
+    "resnet18/control_nw0_bs32_det": {
+      "per_epoch_s": [
+        42.77,
+        42.16
+      ],
+      "measured_s": 42.16,
+      "strides": {
+        "stage1": [
+          32,
+          32
+        ],
+        "final": [
+          4,
+          4
+        ]
+      },
+      "settings": {
+        "num_workers": 0,
+        "batch_size": 32,
+        "amp": false,
+        "deterministic": true
+      }
+    },
+    "mobilenet_v2/control_nw0_bs32_det": {
+      "per_epoch_s": [
+        65.77,
+        65.06
+      ],
+      "measured_s": 65.06,
+      "strides": {
+        "final": [
+          4,
+          4
+        ]
+      },
+      "settings": {
+        "num_workers": 0,
+        "batch_size": 32,
+        "amp": false,
+        "deterministic": true
+      }
+    },
+    "resnet18/fixed_nw8_bs128_amp": {
+      "per_epoch_s": [
+        75.77,
+        31.86
+      ],
+      "measured_s": 31.86,
+      "strides": {
+        "stage1": [
+          32,
+          32
+        ],
+        "final": [
+          4,
+          4
+        ]
+      },
+      "settings": {
+        "num_workers": 8,
+        "batch_size": 128,
+        "amp": true,
+        "deterministic": false
+      }
+    },
+    "mobilenet_v2/fixed_nw8_bs128_amp": {
+      "per_epoch_s": [
+        130.16,
+        83.96
+      ],
+      "measured_s": 83.96,
+      "strides": {
+        "final": [
+          4,
+          4
+        ]
+      },
+      "settings": {
+        "num_workers": 8,
+        "batch_size": 128,
+        "amp": true,
+        "deterministic": false
+      }
+    }
+  },
+  "projections_200_epochs": {
+    "control_nw0_bs32_det": {
+      "pair_s_per_epoch": 107.22,
+      "h_200ep_pair": 5.96,
+      "h_200ep_resnet_only": 2.34,
+      "h_3rollouts_pair": 17.87
+    },
+    "fixed_nw8_bs128_amp": {
+      "pair_s_per_epoch": 115.82,
+      "h_200ep_pair": 6.43,
+      "h_200ep_resnet_only": 1.77,
+      "h_3rollouts_pair": 19.3
+    }
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "env": {
+    "python": "3.10.19",
+    "torch": "2.5.0+cu118",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "recipe": {
+    "optimizer": "SGD",
+    "lr": 0.1,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "scheduler": "CosineAnnealingLR",
+    "t_max": 200,
+    "batch_size": 128,
+    "eval_batch_size": 256,
+    "num_workers": 8,
+    "amp": false,
+    "cudnn_deterministic": true,
+    "val_split": 0.1
+  },
+  "models": {
+    "resnet18": {
+      "train_s_measured": [
+        8.74,
+        8.83
+      ],
+      "val_s_measured": [
+        0.36,
+        0.35
+      ],
+      "epoch_s": 9.14,
+      "lr_first3": [
+        0.1,
+        0.099994,
+        0.099975
+      ],
+      "lr_changed": true,
+      "val_top1_percent_after_3ep": 56.54,
+      "strides": {
+        "final_spatial": [
+          4,
+          4
+        ],
+        "total_stride": 8
+      },
+      "train_size": 45000,
+      "val_size": 5000
+    },
+    "mobilenet_v2": {
+      "train_s_measured": [
+        12.44,
+        12.51
+      ],
+      "val_s_measured": [
+        0.48,
+        0.48
+      ],
+      "epoch_s": 12.96,
+      "lr_first3": [
+        0.1,
+        0.099994,
+        0.099975
+      ],
+      "lr_changed": true,
+      "val_top1_percent_after_3ep": 66.36,
+      "strides": {
+        "final_spatial": [
+          4,
+          4
+        ],
+        "total_stride": 8
+      },
+      "train_size": 45000,
+      "val_size": 5000
+    }
+  },
+  "projection": {
+    "pair_s_per_epoch": 22.1,
+    "h_200ep_pair_one_rollout": 1.23,
+    "h_200ep_9_rollouts": 11.05,
+    "h_200ep_9_rollouts_plus_baseline": 12.28
+  }
+}

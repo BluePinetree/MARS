@@ -316,8 +316,34 @@ def main() -> int:
         "error": getattr(sess, "error", None) if sess else None,
         "output_path": getattr(sess, "output_path", None) if sess else None,
     }
+    # 실험 성공 여부를 종료코드에 반영한다.
+    # `status == "completed"`는 Phase 0~4가 돌았다는 뜻일 뿐이며, 실험이 실패해도
+    # (예: 지표 없이 논문만 작성) `_finish(run_id, "completed", ...)`가 호출된다
+    # — 예외가 발생해야만 "failed"가 된다(pipeline_orchestrator `_execute`).
+    # 이 함수가 status만 보고 0을 반환하면 실패한 실험이 자동화에 성공으로 보고되어
+    # 완주율 집계가 오염된다(실측: 실험 실패 + 논문 생성 16건).
+    rs = summary.get("result_summary")
+    exec_success = rs.get("exec_success") if isinstance(rs, dict) else None
+    summary["exec_success"] = exec_success
+    if summary["status"] != "completed":
+        code = 1                       # 파이프라인 자체가 완주 못 함
+    elif exec_success is False:
+        code = 2                       # 완주했으나 실험 실패 (정직한 실패)
+    elif exec_success is None:
+        code = 3                       # 완주했으나 성공 여부 판정 불가 — 성공으로 집계 금지
+    else:
+        code = 0
+    summary["exit_code"] = code
     print("[anchor] FINAL " + json.dumps(summary, default=str, ensure_ascii=False), flush=True)
-    return 0 if summary["status"] == "completed" else 1
+    if code:
+        print(
+            f"[anchor] exit={code} "
+            f"(status={summary['status']}, exec_success={exec_success}) — "
+            "0=experiment succeeded / 1=pipeline incomplete / 2=experiment failed / "
+            "3=success undetermined",
+            flush=True,
+        )
+    return code
 
 
 if __name__ == "__main__":

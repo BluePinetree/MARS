@@ -405,13 +405,25 @@ class PipelineOrchestrator:
                 # (에폭 레버가 없는 tabular 등은 단일 실행.)
                 from orchestration.target_gate import parse_targets, primary_metric, evaluate, is_better
                 from phases.phase3_execution import _planned_epochs
+                from pipeline_config.constants import (
+                    EPOCH_ESCALATION_CAP,
+                    LONG_RUN_EPOCH_THRESHOLD,
+                )
                 targets = parse_targets(plan_bundle.planner.success_criteria)
                 base_epochs = _planned_epochs(plan_bundle)
                 try:
                     max_iters = max(1, min(int(_md.get("max_experiments") or 3), 5))
                 except Exception:
                     max_iters = 3
-                EPOCH_CAP, PLATEAU_EPS = 30, 0.02
+                # EPOCH_CAP은 계획 예산보다 작아서는 안 된다. 하드코딩 30을 그대로 쓰면
+                # base_epochs=200(문헌 표준)일 때 2회차가 min(600,30)=30으로 **강등**되어
+                # 21시간 성공 run 뒤에 무의미한 재실행을 낳는다.
+                EPOCH_CAP = max(int(base_epochs or 0), EPOCH_ESCALATION_CAP)
+                PLATEAU_EPS = 0.02
+                # 계획 예산이 이미 문헌 수준이면 "예산 증대" 레버 자체가 무의미하므로
+                # 단일 실행으로 고정한다(벤치마크 모드의 max_improvement_iterations=1과 정합).
+                if (base_epochs or 0) >= LONG_RUN_EPOCH_THRESHOLD:
+                    max_iters = 1
                 best_exec, best_val, prev_val, cur_epochs = None, None, None, base_epochs
                 for _it in range(max_iters):
                     exec_result = run_execution_phase(

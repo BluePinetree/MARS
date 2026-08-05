@@ -64,6 +64,44 @@ fixed epoch count) and is therefore the variance this protocol estimates.
 round (`repeats = 1`, §3). LLM sampling is not seed-controllable through the providers used, so
 rollout non-determinism cannot be eliminated, only measured.
 
+### 2.1a Task brief given to the agent (frozen verbatim)
+
+Every framework receives the **byte-identical** topic and goal string. The goal states protocol
+requirements and task requirements; it never states an implementation.
+
+**T3 goal (frozen):**
+
+> Train and compare ResNet-18 and MobileNetV2 on CIFAR-10 and report top-1 accuracy for each.
+> Adapt each architecture to the 32×32 input resolution (do not downsample the input excessively
+> before the first residual stage). Hold out 10% of the training data as a validation set; use the
+> validation set alone for epoch selection and model selection, and evaluate the test set exactly
+> once at the end. Report per-model test top-1 accuracy, the selected epoch, and training time.
+
+**What this is and is not.** *"Adapt each architecture to the 32×32 input resolution"* is a
+requirement, of the kind a supervisor writes in a brief. It is deliberately **not** an
+implementation: the goal does not say "replace the 7×7 stride-2 convolution with 3×3 stride-1 and
+remove the max-pool". The agent must still work out and write the change.
+
+**Why the requirement is stated rather than withheld.** Two conditions were available:
+
+| Condition | Brief contains | Measures |
+|---|---|---|
+| **C1 — adopted** | protocol requirements + architecture requirement | whether the agent implements a correct brief |
+| C2 — not adopted for this round | task only | whether the agent knows unprompted that 32×32 needs an adapted stem |
+
+C2 measures tacit knowledge, which is interesting but is a property of the underlying model, not of
+the orchestration framework — so it would very likely produce the same failure in all three
+frameworks and would not discriminate between them, which is what this benchmark exists to do.
+Preliminary data supports that: MobileNetV2 was stem-adapted in **0 of 3** rollouts.
+
+**C2 evidence is reported from existing data rather than re-measured.** The three preliminary
+CIFAR-10 rollouts were produced under a C2-style brief and are reported as a separate finding —
+that the agent applied the well-documented ResNet CIFAR-stem adaptation in 2 of 3 rollouts but never
+applied the less-documented MobileNetV2 stride adaptation. No new compute is spent on C2.
+
+**Reporting rule.** Numbers produced under C1 are never presented as if they came from a brief that
+withheld the requirement. The goal string above is reproduced in the paper.
+
 ### 2.2 Validation and test discipline
 
 - Each rollout must split a validation set out of the **training** data.
@@ -145,9 +183,11 @@ per-epoch cost on the target machine (RTX A6000).
 
 | Parameter | Value | Basis |
 |---|---|---|
-| `epoch_cap` | **20** | Measured: ResNet-18 55.2 s/epoch, MobileNetV2 98.2 s/epoch on CIFAR-10. A CIFAR-adapted stem (§4.2) keeps 32×32 feature maps through the first stage instead of 8×8 and is expected to raise per-epoch cost by roughly 2–3×; 20 epochs × 2 models then lands near 2 h, fitting 3 rollouts per task inside the submission window |
-| `experiment_timeout_s` | **10800** (3 h) | Covers the above with margin. The previous CrewAI value (5400 s) would have killed a 30-epoch two-model vision run; AutoGen (300 s) and LangGraph (600 s) could not have completed any vision run at all |
-| `wall_clock_cap_s` per rollout | **14400** (4 h) | Hard kill, includes LLM phases |
+| `epoch_cap` | **200** | The standard training length reported for CIFAR-10 in the literature (~93–95% top-1 for ResNet-18 at 200–250 epochs). A short cap would make the published band unreachable by construction and would measure the budget rather than the agent |
+| `experiment_timeout_s` | **43200** (12 h) | Measured, not estimated — see §3.3. The pre-registered recipe costs **22.1 s/epoch** for the two-model pair (ResNet-18 9.14 s + MobileNetV2 12.96 s, including a per-epoch validation pass), i.e. **1.23 h for 200 epochs**. A deliberately unoptimised implementation (`num_workers=0`, `batch_size=32`) measures 107.2 s/epoch for the pair → 5.96 h. The cap therefore carries ~2× margin over the slow case, because throughput depends on code the agent writes. The previous CrewAI value (5400 s) killed a real 200-epoch attempt three times (run `a917380da3a6`, 2026-06-15); AutoGen (300 s) and LangGraph (600 s) could not complete any vision run at all |
+| `wall_clock_cap_s` per rollout | **54000** (15 h) | Hard kill, includes LLM phases and repair loops (~3 h budgeted on top of `experiment_timeout_s`) |
+| `stall_timeout_s` | **3600** (1 h) | Kill the process tree if the experiment produces no output for this long. **Raising `experiment_timeout_s` without this converts "dies at 90 minutes" into "hangs for 12 hours."** The longest legitimate silent gap is one epoch (≤13 s at the recipe throughput, ≤100 s unoptimised) plus first-epoch dataset preparation, so 1 h is ~30× the worst legitimate gap |
+| `epoch_cap` enforcement | **harness-injected and harness-verified** | No framework enforces an epoch budget today. CrewAI derives it from the agent's own plan (`phases/phase3_execution.py` `_planned_epochs`); AutoGen and LangGraph have no epoch plumbing at all. The harness injects `--epochs {epoch_cap}` into every experiment command, and the verifier of §2.6 rejects any rollout whose `result.json` `actual_epochs` does not match. Placing the check outside all three frameworks keeps it symmetric, for the same reason the success criterion is placed there (§3.2). `planned_epochs` is recorded so that what the agent *wanted* stays visible |
 | `max_improvement_iterations` | **1** | Disables within-rollout epoch escalation. Only CrewAI implements such a loop; leaving it on would measure engineering investment rather than framework. Model selection is performed by the 3-rollout protocol in §2.2 instead |
 | `max_codegen_repair_attempts` | **5** | CrewAI's existing value; adopted for all |
 | `max_execution_repair_attempts` | **3** | CrewAI's existing value; adopted for all |
@@ -160,24 +200,89 @@ per-epoch cost on the target machine (RTX A6000).
 | `device` | `cuda` for T3, `cpu` for T1/T2 | Per task, identical across frameworks |
 | `cost_cap_usd` | **not enforced** | No token accounting exists yet (§7) |
 
+### 3.3 Cost calibration (measured 2026-08-05, before any benchmark run)
+
+Budget values in §3 are derived from measurement on the target machine, not from estimates.
+Artifacts: `comparison/calibration/` (scripts + raw JSON). Environment: python 3.10.19,
+torch 2.5.0+cu118, NVIDIA RTX A6000.
+
+Recipe under test = the recipe of §4.2 (SGD lr 0.1 / momentum 0.9 / wd 5e-4, cosine T_max=200,
+batch 128, `num_workers=8`, `cudnn.deterministic=True`, no AMP, CIFAR-adapted stems on both models,
+45 000/5 000 train/val split, per-epoch validation pass).
+
+| Model | s/epoch (train + val) | `total_stride` | LR schedule active |
+|---|---|---|---|
+| ResNet-18 (CIFAR stem) | **9.14** | 8 (final 4×4) | yes |
+| MobileNetV2 (CIFAR stem) | **12.96** | 8 (final 4×4) | yes |
+| **pair** | **22.10** | | |
+
+| Projection | Value |
+|---|---|
+| 200 epochs, one rollout (both models) | **1.23 h** |
+| 9 rollouts (3 frameworks × 3) | **11.05 h** |
+| 9 rollouts + reference baseline | **12.28 h** |
+
+Three findings from calibration changed the budget, and are recorded because they contradict
+plausible assumptions:
+
+1. **The CIFAR stem adaptation is nearly free in wall-clock terms.** It raises multiply-accumulate
+   count ~15× (37.0 → 555.4 MMACs for ResNet-18 at 32×32), but measured epoch time rose only ~10%
+   at `num_workers=0`. Per-epoch cost was bound by single-process data loading, not by the GPU.
+   Budget arithmetic that multiplied a measured epoch time by a "stem factor" therefore
+   double-counted, and the earlier 20-epoch cap was justified by that error.
+2. **`num_workers=8` with `batch_size=128` is the dominant lever**: 107.2 → 22.1 s/epoch for the
+   pair (4.9×). This is why 200 epochs is affordable at all.
+3. **Mixed precision plus `channels_last` makes MobileNetV2 slower** (13.94 → 16.41 s/epoch), a
+   known regression pattern for depthwise convolutions, so neither is used. Consequently
+   `cudnn.deterministic=True` is retained at no throughput cost — determinism is not traded away
+   for speed, which supports the reproducibility tiers of §6.2.
+
 ### 3.1 Model and temperature
 
-All frameworks use the **same model assignment**: `gpt-5.2` for planning / design / code generation /
-analysis / writing, `gpt-5-mini` for execution reporting.
+All frameworks use the **same model assignment**: `gpt-5.2` for **every** LLM-backed role.
+`gpt-5-mini` is not used. Rationale: CrewAI never instantiates an executor LLM
+(`experiment_executor` is declared in `config.yaml` but has no call site — verified by enumerating
+every `create_llm_for_agent` caller), so assigning a smaller model to that role would create an LLM
+call that one framework makes and another does not. A single model also removes model as a possible
+confound with framework.
 
-Temperature is **declared identically across frameworks**, with one conditional resolved in advance:
+**Sampling parameters are not sent by any framework.** The v1 conditional is resolved to the "omit"
+branch:
 
-- Intended: identical per-role temperature for all three frameworks.
-- Measured state at v1: CrewAI applies its configured temperatures; AutoGen deliberately omits
-  temperature on GPT-5 paths (documented in `core/llm_factory.py` as an API constraint); LangGraph
-  configures temperatures but never passes them.
-- **Decision rule, fixed now:** if the model API accepts an explicit temperature, all three
-  frameworks pass the same per-role values. If it does not, **all three omit temperature** and the
-  provider default is used uniformly. Whichever branch is taken is reported, and the actual applied
-  value per framework is recorded in each run record.
+- `temperature`, `top_p`, `top_k`, `presence_penalty`, `frequency_penalty` are **not sent** on any
+  request by any framework.
+- Evidence for taking this branch:
+  1. `gpt-5.2` accepts an explicit `temperature` **only** when `reasoning_effort` is `none` (its
+     default). At any higher effort the API rejects it.
+  2. `gpt-5-mini` / `gpt-5-nano` / `gpt-5` / `gpt-5.2-pro` reject any `temperature` other than the
+     default.
+  3. Therefore "identical explicit per-role temperature across frameworks" is unreachable, and
+     achieving it for `gpt-5.2` alone would require permanently pinning `reasoning_effort=none` —
+     i.e. benchmarking a reasoning-disabled configuration. That changes what is being measured, so
+     it is not an acceptable way to satisfy a parameter-uniformity requirement.
+- Measured state at v1, recorded because it contradicts what the configuration files suggest:
+  CrewAI **was** sending its configured temperatures (verified offline by assembling the request
+  payload without contacting the provider: the OpenAI provider's `_prepare_responses_params` emits
+  `{'input', 'model', 'temperature'}`, and its only special case is an `o1`-model check that
+  `gpt-5.2` does not match). Those requests succeeded solely because CrewAI sends no
+  `reasoning_effort`. AutoGen omitted temperature deliberately; LangGraph configured temperatures
+  into an object that is never constructed at runtime. A record of *declared* configuration would
+  have shown all three as compliant.
 
-This is a commitment to uniformity, not to a specific number, because the number is contingent on a
-provider constraint that must be verified rather than assumed.
+**`reasoning_effort` is an explicit pre-registered parameter.** Omitting temperature removes the
+constraint that previously pinned effort to `none`, so effort must be stated rather than inherited:
+
+| Parameter | Value | Basis |
+|---|---|---|
+| `reasoning_effort` | **`medium`** | Sent explicitly by all three frameworks. Leaving it unsent resolves to `none`, which is uniform only by accident and silently breakable; and benchmarking a reasoning model with reasoning off would not represent the system under study |
+| `temperature` / `top_p` / `top_k` | **not sent** | See above |
+
+Because `medium` differs from the effort under which all preliminary CrewAI runs were produced
+(`none`, by default), preliminary latency and token figures are **not** continuous with this
+round's and are not compared across the change.
+
+The parameter set actually placed on the wire is recorded per rollout (§6.1) and asserted equal
+across frameworks by an offline parity check that makes no API calls (§6.4).
 
 ### 3.2 Reliability defences are a controlled variable
 
@@ -207,9 +312,32 @@ is well established and does not depend on a training-budget choice.
 
 ### 4.2 Vision — procedure frozen in v1, values set in v2
 
-Literature SOTA is **not** usable as a threshold. CIFAR-10 ResNet-18 reaches ~94.9% only at 200–250
-epochs; the epoch cap in §3 is 20. A SOTA threshold would make qualification impossible regardless
-of agent behaviour, and would measure the budget rather than the agent.
+Literature SOTA is **not** usable as a threshold, but the reason is not budget mismatch — at the
+§3 cap of 200 epochs the published ~93–95% band is within reach. A published number is unusable
+because it was not produced under this protocol: published figures do not fix our validation split
+(§3, 10% carved out of train), our evaluate-test-once discipline (§2.2), our seed, or our exact stem
+adaptation, and they are frequently selected on the test set. A threshold taken from a paper would
+therefore fold protocol differences into the qualification decision.
+
+The human-written reference baseline removes that confound: same architectures, same stem
+adaptation, same budget, same split, same seed, same select-on-validation / evaluate-test-once
+discipline. The only difference is that a human wrote the code — which is the contrast this
+benchmark exists to measure.
+
+**Threshold tolerance: `baseline_test_top1 − 2.00 pp`, per model.**
+
+The tolerance is not a convenience margin; it is the observed spread between competent human
+implementations of the same recipe on the same model. Published CIFAR-10 ResNet-18 results under
+the §4.2 recipe range from **93.02%** (kuangliu/pytorch-cifar) to **95.4%**
+(HF `jaeunglee/resnet18-cifar10-unlearning`) — a **2.4 pp** band. A tolerance narrower than that
+band would fail agents for landing inside the range of normal human variation, which measures
+nothing about orchestration. 2.00 pp is set just inside the observed band.
+
+**The threshold is per model, not per rollout best.** A rollout qualifies only if **both**
+ResNet-18 and MobileNetV2 clear their own thresholds. Taking the best model would let a rollout
+qualify while one arm of the comparison is broken — and that failure mode is already observed:
+across three preliminary CIFAR-10 rollouts, ResNet-18 was stem-adapted in 2 of 3 but MobileNetV2 in
+**0 of 3**, so a best-model rule would have passed rollouts whose headline comparison was invalid.
 
 **Procedure (frozen):**
 
@@ -314,5 +442,10 @@ reported as an autonomy indicator, and no run in this benchmark may be described
 
 | Version | Date | Change |
 |---|---|---|
-| v1 | *(this commit)* | Initial: §1–§7 frozen; tabular thresholds set; vision threshold procedure set |
-| v2 | pending | Vision threshold values from reference baseline run |
+| v1 | 2026-08-04 | Initial: §1–§7 frozen; tabular thresholds set; vision threshold procedure set |
+| v1.1 | 2026-08-05 | `epoch_cap` 20 → **200** (literature standard, user decision). §3 budget re-derived from measurement (§3.3 added: 22.1 s/epoch for the model pair; timeout 3 h → 12 h; `stall_timeout_s` added; harness-level epoch enforcement specified). §3.1 resolved to the sampling-omit branch with `reasoning_effort=medium` and a single model (`gpt-5.2`) for all roles. §4.2 threshold tolerance set to **−2.00 pp per model**, justified by the 2.4 pp spread between published human implementations, and made per-model rather than best-model. §2.1a added: the T3 brief is frozen verbatim under condition **C1** (protocol + architecture requirements stated, implementation withheld); C2 is reported from existing data only |
+| v2 | pending | Vision threshold values from the reference baseline run |
+
+> No MARS benchmark rollout has been executed under this protocol at the time of the v1.1 commit.
+> The reference baseline has not been run. Calibration runs (§3.3) train for 3 epochs to measure
+> cost only, produce no benchmark result, and are not rollouts.
